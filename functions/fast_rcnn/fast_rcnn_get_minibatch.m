@@ -69,6 +69,9 @@ function [im_blob, im_scales] = get_image_blob(conf, images, random_scale_inds)
     im_scales = nan(num_images, 1);
     for i = 1:num_images
         im = imread(images(i).image_path);
+        if ndims(im) == 2
+            im = cat(3, im, im, im);
+        end
         target_size = conf.scales(random_scale_inds(i));
         
         [im, im_scale] = prep_im_for_blob(im, conf.image_means, target_size, conf.max_size);
