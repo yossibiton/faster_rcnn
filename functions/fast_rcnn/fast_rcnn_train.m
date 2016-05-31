@@ -69,14 +69,26 @@ function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, vararg
     
 %% making tran/val data
     fprintf('Preparing training data...');
-    [image_roidb_train, bbox_means, bbox_stds]...
-                            = fast_rcnn_prepare_image_roidb(conf, opts.imdb_train, opts.roidb_train);
+    db_train_path = fullfile(cache_dir, 'db_train.mat');
+    if exist(db_train_path, 'file')
+        load(db_train_path, 'image_roidb_train', 'bbox_means', 'bbox_stds');
+    else
+        [image_roidb_train, bbox_means, bbox_stds]...
+            = fast_rcnn_prepare_image_roidb(conf, opts.imdb_train, opts.roidb_train);
+        save(db_train_path, 'image_roidb_train', 'bbox_means', 'bbox_stds');
+    end
     fprintf('Done.\n');
     
     if opts.do_val
         fprintf('Preparing validation data...');
-        [image_roidb_val]...
-                                = fast_rcnn_prepare_image_roidb(conf, opts.imdb_val, opts.roidb_val, bbox_means, bbox_stds);
+        db_val_path = fullfile(cache_dir, 'db_val.mat');
+        if exist(db_val_path, 'file')
+            load(db_val_path, 'image_roidb_val');
+        else
+            [image_roidb_val]...
+                = fast_rcnn_prepare_image_roidb(conf, opts.imdb_val, opts.roidb_val, bbox_means, bbox_stds);
+            save(db_val_path, 'image_roidb_val');
+        end
         fprintf('Done.\n');
 
         % fix validation data
@@ -133,7 +145,7 @@ function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, vararg
                 end
             end
             
-            show_state(iter_, train_results, val_results);
+            perf = show_state(iter_, train_results, val_results);
             train_results = [];
             val_results = [];
             diary; diary; % flush diary
@@ -163,24 +175,37 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
         % make sure each minibatch, only has horizontal images or vertical
         % images, to save gpu memory
         
+        shuffled_inds = [];
         hori_image_inds = arrayfun(@(x) x.im_size(2) >= x.im_size(1), image_roidb_train, 'UniformOutput', true);
-        vert_image_inds = ~hori_image_inds;
-        hori_image_inds = find(hori_image_inds);
-        vert_image_inds = find(vert_image_inds);
+        image_indices = {find(hori_image_inds), find(~hori_image_inds)};
+        % looking for images with at least one roi of any class
+        % in each batch we will choose at least half such images
+        pos_image_indices = arrayfun(@(x) nnz(x.class) > 0, image_roidb_train);
         
-        % random perm
-        lim = floor(length(hori_image_inds) / ims_per_batch) * ims_per_batch;
-        hori_image_inds = hori_image_inds(randperm(length(hori_image_inds), lim));
-        lim = floor(length(vert_image_inds) / ims_per_batch) * ims_per_batch;
-        vert_image_inds = vert_image_inds(randperm(length(vert_image_inds), lim));
+        % seperate generation for horizontal/vertical
+        for k = 1:2
+            image_indices_ = image_indices{k};
+            image_indices_pos = find(pos_image_indices(image_indices_));
+            pos_frac = length(image_indices_pos) / length(image_indices_);
+            if (pos_frac < 0.5)
+                % replicate "positive" images in order to have balanced sampling
+                rep_factor = 1 / pos_frac - 2;
+                add_pos = round(rep_factor * sum(pos_image_indices(image_indices_)));
+                
+                image_indices_pos_rep = repmat(image_indices_pos, ceil(rep_factor), 1);
+                image_indices_ = [image_indices_; ...
+                    image_indices_pos_rep(randperm(length(image_indices_pos_rep), add_pos))];
+            end
+            
+            % random perm
+            lim = floor(length(image_indices_) / ims_per_batch) * ims_per_batch;
+            image_indices_ = image_indices_(randperm(length(image_indices_), lim));
+            % combine sample for each ims_per_batch 
+            image_indices_ = reshape(image_indices_, ims_per_batch, []);
+            shuffled_inds = [shuffled_inds, image_indices_];
+        end
         
-        % combine sample for each ims_per_batch 
-        hori_image_inds = reshape(hori_image_inds, ims_per_batch, []);
-        vert_image_inds = reshape(vert_image_inds, ims_per_batch, []);
-        
-        shuffled_inds = [hori_image_inds, vert_image_inds];
         shuffled_inds = shuffled_inds(:, randperm(size(shuffled_inds, 2)));
-        
         shuffled_inds = num2cell(shuffled_inds, 1);
     end
     
@@ -251,16 +276,23 @@ function model_path = snapshot(caffe_solver, bbox_means, bbox_stds, cache_dir, f
     caffe_solver.net.set_params_data(bbox_pred_layer_name, 2, biase_back);
 end
 
-function show_state(iter, train_results, val_results)
+function perf = show_state(iter, train_results, val_results)
+    perf = struct;
+    perf.train = struct;
+    perf.train.error_cls = 1 - mean(train_results.accuarcy.data);
+    perf.train.loss_cls = mean(train_results.loss_cls.data);
+    perf.train.loss_reg = mean(train_results.loss_bbox.data);
+    
+    perf.test = struct;
+    perf.test.error_cls = 1 - mean(val_results.accuarcy.data);
+    perf.test.loss_cls = mean(val_results.loss_cls.data);
+    perf.test.loss_reg = mean(val_results.loss_bbox.data);
+    
     fprintf('\n------------------------- Iteration %d -------------------------\n', iter);
     fprintf('Training : error %.3g, loss (cls %.3g, reg %.3g)\n', ...
-        1 - mean(train_results.accuarcy.data), ...
-        mean(train_results.loss_cls.data), ...
-        mean(train_results.loss_bbox.data));
+        perf.train.error_cls, perf.train.loss_cls, perf.train.loss_reg);
     if exist('val_results', 'var') && ~isempty(val_results)
         fprintf('Testing  : error %.3g, loss (cls %.3g, reg %.3g)\n', ...
-            1 - mean(val_results.accuarcy.data), ...
-            mean(val_results.loss_cls.data), ...
-            mean(val_results.loss_bbox.data));
+            perf.test.error_cls, perf.test.loss_cls, perf.test.loss_reg);
     end
 end
