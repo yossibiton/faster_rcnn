@@ -68,7 +68,12 @@ function [im_blob, im_scales] = get_image_blob(conf, images, random_scale_inds)
     processed_ims = cell(num_images, 1);
     im_scales = nan(num_images, 1);
     for i = 1:num_images
-        im = imread(images(i).image_path);
+        if isempty(images(i).image)
+            im = imread(images(i).image_path);
+        else
+            im = images(i).image;
+        end
+        
         if ndims(im) == 2
             im = cat(3, im, im, im);
         end
