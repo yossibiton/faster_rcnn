@@ -1,4 +1,4 @@
-function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
+function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
 % save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
 % --------------------------------------------------------
 % Fast R-CNN
@@ -30,6 +30,7 @@ function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, vararg
     opts = ip.Results;
     
 %% try to find trained model
+    perf = {};
     imdbs_name = cell2mat(cellfun(@(x) x.name, imdb_train, 'UniformOutput', false));
     cache_dir = fullfile(pwd, 'output', 'fast_rcnn_cachedir', opts.cache_name, imdbs_name);
     save_model_path = fullfile(cache_dir, 'final');
@@ -106,7 +107,6 @@ function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, vararg
     val_results = [];  
     iter_ = caffe_solver.iter();
     max_iter = caffe_solver.max_iter();
-    
     while (iter_ < max_iter)
         caffe_solver.net.set_phase('train');
 
@@ -125,8 +125,9 @@ function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, vararg
         rst = caffe_solver.net.get_output();
         train_results = parse_rst(train_results, rst);
             
-        % do valdiation per val_interval iterations
-        if ~mod(iter_, opts.val_interval) 
+        % do valdiation per val_interval iterations or 
+        %                   once full epoch is done
+        if ~mod(iter_, opts.val_interval) || isempty(shuffled_inds)
             if opts.do_val
                 caffe_solver.net.set_phase('test');                
                 for i = 1:length(shuffled_inds_val)
@@ -145,7 +146,10 @@ function save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, vararg
                 end
             end
             
-            perf = show_state(iter_, train_results, val_results);
+            perf_temp = show_state(iter_, train_results, val_results);
+            perf_temp.iter = iter_;
+            perf{end+1} = perf_temp;
+            
             train_results = [];
             val_results = [];
             diary; diary; % flush diary
