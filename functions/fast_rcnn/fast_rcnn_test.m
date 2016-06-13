@@ -64,7 +64,11 @@ function mAP = fast_rcnn_test(conf, imdb, roidb, varargin)
         end             
 
         % determine the maximum number of rois in testing 
-        max_rois_num_in_gpu = check_gpu_memory(conf, caffe_net);
+        if conf.use_gpu
+            max_rois_num_in_gpu = check_gpu_memory(conf, caffe_net);
+        else
+            max_rois_num_in_gpu = 2000;
+        end
 
         disp('opts:');
         disp(opts);

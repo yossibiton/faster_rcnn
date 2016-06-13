@@ -263,8 +263,16 @@ function model_path = snapshot(caffe_solver, bbox_means, bbox_stds, cache_dir, f
     weights_back = weights;
     biase_back = biase;
     
-    weights = ...
-        bsxfun(@times, weights, bbox_stds_flatten'); % weights = weights * stds; 
+    switch ndims(weights)
+        case 2
+            % fc layer, weights = 4k x N (k = #classes)
+            weights = ...
+                bsxfun(@times, weights, bbox_stds_flatten');     % weights = weights * stds; 
+        case 4
+            % conv layer, weights = M x N x C x 4k
+            weights = ...
+                bsxfun(@times, weights, reshape(bbox_stds_flatten, [1 1 1 numel(bbox_stds_flatten)]));     % weights = weights * stds; 
+    end
     biase = ...
         biase .* bbox_stds_flatten + bbox_means_flatten; % bias = bias * stds + means;
     
