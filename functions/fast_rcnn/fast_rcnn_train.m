@@ -21,31 +21,83 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
                                         10000,          @isscalar);
     ip.addParamValue('solver_def_file', fullfile(pwd, 'models', 'Zeiler_conv5', 'solver.prototxt'), ...
                                                         @isstr);
+    ip.addParamValue('net_def_file',    fullfile(pwd, 'models', 'Zeiler_conv5', 'train_val.prototxt'), ...
+                                                        @isstr);                                                    
     ip.addParamValue('net_file',        fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'), ...
                                                         @isstr);
-    ip.addParamValue('cache_name',      'Zeiler_conv5', ...
-                                                        @isstr);
+    ip.addParamValue('cache_name',      'Zeiler_conv5', @isstr);
+    ip.addParamValue('shouldContinue',  false, @isscalar);
     
     ip.parse(conf, imdb_train, roidb_train, varargin{:});
     opts = ip.Results;
     
 %% try to find trained model
     perf = {};
+    
     imdbs_name = cell2mat(cellfun(@(x) x.name, imdb_train, 'UniformOutput', false));
     cache_dir = fullfile(pwd, 'output', 'fast_rcnn_cachedir', opts.cache_name, imdbs_name);
     save_model_path = fullfile(cache_dir, 'final');
-    if exist(save_model_path, 'file')
+    perf_path = fullfile(cache_dir, 'perf.mat');
+    if exist(save_model_path, 'file') && ~opts.shouldContinue
+        if exist(perf_path, 'file')
+            load(perf_path, 'perf');
+        end
         return;
     end
     
 %% init
     % init caffe solver
     mkdir_if_missing(cache_dir);
+    
     caffe_log_file_base = fullfile(cache_dir, 'caffe_log');
     caffe.init_log(caffe_log_file_base);
     caffe_solver = caffe.Solver(opts.solver_def_file);
-    caffe_solver.net.copy_from(opts.net_file);
+    
+    % we don't care about 'net' field in solver file
+    % caffe_solver.net = caffe.Net(opts.net_def_file, 'train');
+    
+    if opts.shouldContinue && exist(save_model_path, 'file')
+        % initalize from last saved model       
+        saved_models = dir([save_model_path '*']);
+        stage_num = length(saved_models) + 1;
 
+        % model files
+        saved_models_names = dir(fullfile(cache_dir, 'iter_*'));
+        saved_models_names = {saved_models_names.name};
+        saved_models_names{end+1} = 'final';
+        for i_file = 1:length(saved_models_names)
+            modified_name = sprintf('%02d_%s', ...
+                stage_num - 1, saved_models_names{i_file});
+            movefile(fullfile(cache_dir, saved_models_names{i_file}), ...
+                fullfile(cache_dir, modified_name));
+        end
+        opts.net_file = fullfile(cache_dir, modified_name);
+
+        % solver file
+        if exist(fullfile(cache_dir, 'solver.prototxt'), 'file')
+            movefile(fullfile(cache_dir, 'solver.prototxt'), ...
+                fullfile(cache_dir, sprintf('%02d_solver.prototxt', stage_num - 1)));
+        end
+
+        % perf file
+        if exist(perf_path, 'file')
+            movefile(perf_path, ...
+                strrep(perf_path, 'perf.mat', sprintf('%02d_perf.mat', stage_num - 1)));
+        end
+    else
+        saved_models_names = dir(fullfile(cache_dir, '*final'));
+        opts.net_file = fullfile(cache_dir, saved_models_names(end).name);
+    end
+    
+    if ~strcmp(opts.net_file, '')
+        % initialize from pre-trained network
+        caffe_solver.net.copy_from(opts.net_file);
+    end
+
+    % first copy solver & network file to output dir
+    copyfile(opts.net_def_file, fullfile(cache_dir, 'train_val.prototxt'));
+    copyfile(opts.solver_def_file, fullfile(cache_dir, 'solver.prototxt'));
+    
     % init log
     timestamp = datestr(datevec(now()), 'yyyymmdd_HHMMSS');
     mkdir_if_missing(fullfile(cache_dir, 'log'));
@@ -130,7 +182,7 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
         if ~mod(iter_, opts.val_interval) || isempty(shuffled_inds)
             if opts.do_val
                 caffe_solver.net.set_phase('test');                
-                for i = 1:length(shuffled_inds_val)
+                for i = 1:size(shuffled_inds_val, 2)
                     sub_db_inds = shuffled_inds_val{i};
                     [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
                         fast_rcnn_get_minibatch(conf, image_roidb_val(sub_db_inds));
@@ -149,6 +201,7 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
             perf_temp = show_state(iter_, train_results, val_results);
             perf_temp.iter = iter_;
             perf{end+1} = perf_temp;
+            save(perf_path, 'perf');
             
             train_results = [];
             val_results = [];
@@ -181,14 +234,17 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
         
         shuffled_inds = [];
         hori_image_inds = arrayfun(@(x) x.im_size(2) >= x.im_size(1), image_roidb_train, 'UniformOutput', true);
+        hori_image_inds = hori_image_inds(:);
         image_indices = {find(hori_image_inds), find(~hori_image_inds)};
         % looking for images with at least one roi of any class
         % in each batch we will choose at least half such images
         pos_image_indices = arrayfun(@(x) nnz(x.class) > 0, image_roidb_train);
+        pos_image_indices = pos_image_indices(:);
         
         % seperate generation for horizontal/vertical
         for k = 1:2
-            image_indices_ = image_indices{k};
+            image_indices_ = image_indices{k}(:);
+            
             image_indices_pos = find(pos_image_indices(image_indices_));
             pos_frac = length(image_indices_pos) / length(image_indices_);
             if (pos_frac < 0.5)
@@ -226,7 +282,8 @@ function check_gpu_memory(conf, caffe_solver, num_classes, do_val)
 %%  try to train/val with images which have maximum size potentially, to validate whether the gpu memory is enough  
 
     % generate pseudo training data with max size
-    im_blob = single(zeros(max(conf.scales), conf.max_size, 3, conf.ims_per_batch));
+    num_channels = size(conf.image_means, 3);
+    im_blob = single(zeros(max(conf.scales), conf.max_size, num_channels, conf.ims_per_batch));
     rois_blob = single(repmat([0; 0; 0; max(conf.scales)-1; conf.max_size-1], 1, conf.batch_size));
     rois_blob = permute(rois_blob, [3, 4, 1, 2]);
     labels_blob = single(ones(conf.batch_size, 1));
@@ -253,39 +310,47 @@ function check_gpu_memory(conf, caffe_solver, num_classes, do_val)
 end
 
 function model_path = snapshot(caffe_solver, bbox_means, bbox_stds, cache_dir, file_name)
-    bbox_stds_flatten = reshape(bbox_stds', [], 1);
-    bbox_means_flatten = reshape(bbox_means', [], 1);
-    
-    % merge bbox_means, bbox_stds into the model
-    bbox_pred_layer_name = 'bbox_pred';
-    weights = caffe_solver.net.params(bbox_pred_layer_name, 1).get_data();
-    biase = caffe_solver.net.params(bbox_pred_layer_name, 2).get_data();
-    weights_back = weights;
-    biase_back = biase;
-    
-    switch ndims(weights)
-        case 2
-            % fc layer, weights = 4k x N (k = #classes)
-            weights = ...
-                bsxfun(@times, weights, bbox_stds_flatten');     % weights = weights * stds; 
-        case 4
-            % conv layer, weights = M x N x C x 4k
-            weights = ...
-                bsxfun(@times, weights, reshape(bbox_stds_flatten, [1 1 1 numel(bbox_stds_flatten)]));     % weights = weights * stds; 
-    end
-    biase = ...
-        biase .* bbox_stds_flatten + bbox_means_flatten; % bias = bias * stds + means;
-    
-    caffe_solver.net.set_params_data(bbox_pred_layer_name, 1, weights);
-    caffe_solver.net.set_params_data(bbox_pred_layer_name, 2, biase);
 
     model_path = fullfile(cache_dir, file_name);
-    caffe_solver.net.save(model_path);
-    fprintf('Saved as %s\n', model_path);
+    bbox_pred_layer_name = 'bbox_pred';
+    if any(ismember(caffe_solver.net.layer_names, bbox_pred_layer_name))
+        bbox_stds_flatten = reshape(bbox_stds', [], 1);
+        bbox_means_flatten = reshape(bbox_means', [], 1);
+
+        % merge bbox_means, bbox_stds into the model
+
+        weights = caffe_solver.net.params(bbox_pred_layer_name, 1).get_data();
+        biase = caffe_solver.net.params(bbox_pred_layer_name, 2).get_data();
+        weights_back = weights;
+        biase_back = biase;
     
-    % restore net to original state
-    caffe_solver.net.set_params_data(bbox_pred_layer_name, 1, weights_back);
-    caffe_solver.net.set_params_data(bbox_pred_layer_name, 2, biase_back);
+        switch ndims(weights)
+            case 2
+                % fc layer, weights = 4k x N (k = #classes)
+                weights = ...
+                    bsxfun(@times, weights, bbox_stds_flatten');     % weights = weights * stds; 
+            case 4
+                % conv layer, weights = M x N x C x 4k
+                weights = ...
+                    bsxfun(@times, weights, reshape(bbox_stds_flatten, [1 1 1 numel(bbox_stds_flatten)]));     % weights = weights * stds; 
+        end
+        biase = ...
+            biase .* bbox_stds_flatten + bbox_means_flatten; % bias = bias * stds + means;
+
+        caffe_solver.net.set_params_data(bbox_pred_layer_name, 1, weights);
+        caffe_solver.net.set_params_data(bbox_pred_layer_name, 2, biase);
+
+        caffe_solver.net.save(model_path);
+        fprintf('Saved as %s\n', model_path);
+
+        % restore net to original state
+        caffe_solver.net.set_params_data(bbox_pred_layer_name, 1, weights_back);
+        caffe_solver.net.set_params_data(bbox_pred_layer_name, 2, biase_back);
+    else
+        % no bbox regression part, just save the model
+        caffe_solver.net.save(model_path);
+        fprintf('Saved as %s\n', model_path);
+    end
 end
 
 function perf = show_state(iter, train_results, val_results)

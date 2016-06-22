@@ -46,7 +46,9 @@ function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = 
     end
     
     % permute data into caffe c++ memory, thus [num, channels, height, width]
-    im_blob = im_blob(:, :, [3, 2, 1], :); % from rgb to brg
+    if size(im_blob, 3) == 3
+        im_blob = im_blob(:, :, [3, 2, 1], :); % from rgb to brg
+    end
     im_blob = single(permute(im_blob, [2, 1, 3, 4]));
     rois_blob = rois_blob - 1; % to c's index (start from 0)
     rois_blob = single(permute(rois_blob, [3, 4, 2, 1]));
@@ -74,7 +76,8 @@ function [im_blob, im_scales] = get_image_blob(conf, images, random_scale_inds)
             im = images(i).image;
         end
         
-        if ndims(im) == 2
+        if ndims(im) == 2 && ndims(conf.image_means) == 3
+            % replicate from grayscale to "rgb"
             im = cat(3, im, im, im);
         end
         target_size = conf.scales(random_scale_inds(i));

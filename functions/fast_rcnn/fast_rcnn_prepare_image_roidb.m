@@ -23,13 +23,20 @@ function [image_roidb, bbox_means, bbox_stds] = fast_rcnn_prepare_image_roidb(co
     imdbs = imdbs(:);
     roidbs = roidbs(:);
     
-    image_roidb = ...
-        cellfun(@(x, y) ... // @(imdbs, roidbs)
-                arrayfun(@(z) ... //@([1:length(x.image_ids)])
-                        struct('image_path', x.image_at(z), 'image_id', x.image_ids{z}, 'im_size', x.sizes(z, :), 'imdb_name', x.name, ...
-                        'overlap', y.rois(z).overlap, 'boxes', y.rois(z).boxes, 'class', y.rois(z).class, 'image', [], 'bbox_targets', []), ...
-                [1:length(x.image_ids)]', 'UniformOutput', true),...
-        imdbs, roidbs, 'UniformOutput', false);
+    image_roidb = {};
+    for k = 1:length(imdbs)
+        x = imdbs{k};
+        y_rois = roidbs{k}.rois;
+        n_images = length(x.image_ids);
+        image_roidb_i = struct('image_path', cell(1, n_images), 'image_id', cell(1, n_images), 'im_size', cell(1, n_images), ...
+            'imdb_name', cell(1, n_images), 'overlap', cell(1, n_images), 'boxes', cell(1, n_images), 'class', cell(1, n_images), ...
+            'image', cell(1, n_images), 'bbox_targets', cell(1, n_images));
+        parfor z = 1:n_images
+            image_roidb_i(z) = struct('image_path', x.image_at(z), 'image_id', x.image_ids{z}, 'im_size', x.sizes(z, :), 'imdb_name', x.name, ...
+                'overlap', y_rois(z).overlap, 'boxes', y_rois(z).boxes, 'class', y_rois(z).class, 'image', [], 'bbox_targets', []);
+        end
+        image_roidb{k} = image_roidb_i;
+    end
     
     image_roidb = cat(1, image_roidb{:});
     
