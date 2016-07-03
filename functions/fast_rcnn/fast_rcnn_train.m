@@ -84,9 +84,6 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
             movefile(perf_path, ...
                 strrep(perf_path, 'perf.mat', sprintf('%02d_perf.mat', stage_num - 1)));
         end
-    else
-        saved_models_names = dir(fullfile(cache_dir, '*final'));
-        opts.net_file = fullfile(cache_dir, saved_models_names(end).name);
     end
     
     if ~strcmp(opts.net_file, '')
@@ -146,7 +143,7 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
 
         % fix validation data
         shuffled_inds_val = generate_random_minibatch([], image_roidb_val, conf.ims_per_batch);
-        shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), opts.val_iters));
+        shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), min(opts.val_iters, length(shuffled_inds_val))));
     end
     
 %%  try to train/val with images which have maximum size potentially, to validate whether the gpu memory is enough  
