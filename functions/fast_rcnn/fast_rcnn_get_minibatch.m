@@ -12,7 +12,13 @@ function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = 
     % Infer number of classes from the number of columns in gt_overlaps
     num_classes = size(image_roidb(1).overlap, 2);
     % Sample random scales to use for each image in this batch
-    random_scale_inds = randi(length(conf.scales), num_images, 1);
+    if conf.keep_scale
+        img_sizes = reshape([image_roidb.im_size]', [2 length(image_roidb)]);
+        batch_scales = min(img_sizes, [], 1);
+    else
+        random_scale_inds = randi(length(conf.scales), num_images, 1);
+        batch_scales = conf.scales(random_scale_inds);
+    end
     
     assert(mod(conf.batch_size, num_images) == 0, ...
         sprintf('num_images %d must divide BATCH_SIZE %d', num_images, conf.batch_size));
@@ -21,7 +27,7 @@ function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = 
     fg_rois_per_image = round(rois_per_image * conf.fg_fraction);
     
     % Get the input image blob
-    [im_blob, im_scales] = get_image_blob(conf, image_roidb, random_scale_inds);
+    [im_blob, im_scales] = get_image_blob(conf, image_roidb, batch_scales);
     
     % build the region of interest and label blobs
     rois_blob = zeros(0, 5, 'single');
@@ -64,7 +70,7 @@ function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = 
 end
 
 %% Build an input blob from the images in the roidb at the specified scales.
-function [im_blob, im_scales] = get_image_blob(conf, images, random_scale_inds)
+function [im_blob, im_scales] = get_image_blob(conf, images, target_sizes)
     
     num_images = length(images);
     processed_ims = cell(num_images, 1);
@@ -80,9 +86,8 @@ function [im_blob, im_scales] = get_image_blob(conf, images, random_scale_inds)
             % replicate from grayscale to "rgb"
             im = cat(3, im, im, im);
         end
-        target_size = conf.scales(random_scale_inds(i));
         
-        [im, im_scale] = prep_im_for_blob(im, conf.image_means, target_size, conf.max_size);
+        [im, im_scale] = prep_im_for_blob(im, conf.image_means, target_sizes(i), conf.max_size);
         
         im_scales(i) = im_scale;
         processed_ims{i} = im; 
@@ -95,13 +100,14 @@ end
 function [labels, overlaps, rois, bbox_targets, bbox_loss_weights] = ...
     sample_rois(conf, image_roidb, fg_rois_per_image, rois_per_image)
 
-    [overlaps, labels] = max(image_roidb(1).overlap, [], 2);
+    [overlaps, labels] = max(image_roidb.overlap, [], 2);
 %     labels = image_roidb(1).max_classes;
 %     overlaps = image_roidb(1).max_overlaps;
-    rois = image_roidb(1).boxes;
+    rois = image_roidb.boxes;
     
-    % Select foreground ROIs as those with >= FG_THRESH overlap
-    fg_inds = find(overlaps >= conf.fg_thresh);
+    % Select foreground ROIs as those with >= FG_THRESH overlap, 
+    %   and which are not gt bbox
+    fg_inds = find(overlaps >= conf.fg_thresh & image_roidb.class == 0);
     % Guard against the case when an image has fewer than fg_rois_per_image
     % foreground ROIs
     fg_rois_per_this_image = min(fg_rois_per_image, length(fg_inds));
@@ -132,11 +138,10 @@ function [labels, overlaps, rois, bbox_targets, bbox_loss_weights] = ...
     assert(all(labels == image_roidb.bbox_targets(keep_inds, 1)));
     
     % Infer number of classes from the number of columns in gt_overlaps
-    num_classes = size(image_roidb(1).overlap, 2);
+    num_classes = size(image_roidb.overlap, 2);
     
     [bbox_targets, bbox_loss_weights] = get_bbox_regression_labels(conf, ...
         image_roidb.bbox_targets(keep_inds, :), num_classes);
-    
 end
 
 function [bbox_targets, bbox_loss_weights] = get_bbox_regression_labels(conf, bbox_target_data, num_classes)

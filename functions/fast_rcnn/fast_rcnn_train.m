@@ -12,21 +12,21 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
     ip.addRequired('conf',                              @isstruct);
     ip.addRequired('imdb_train',                        @iscell);
     ip.addRequired('roidb_train',                       @iscell);
-    ip.addParamValue('do_val',          false,          @isscalar);
-    ip.addParamValue('imdb_val',        struct(),       @isstruct);
-    ip.addParamValue('roidb_val',       struct(),       @isstruct);
-    ip.addParamValue('val_iters',       500,            @isscalar); 
-    ip.addParamValue('val_interval',    2000,           @isscalar); 
-    ip.addParamValue('snapshot_interval',...
+    ip.addParameter('do_val',          false,          @isscalar);
+    ip.addParameter('imdb_val',                         @iscell);
+    ip.addParameter('roidb_val',                        @iscell);
+    ip.addParameter('val_iters',       500,            @isscalar); 
+    ip.addParameter('val_interval',    2000,           @isscalar); 
+    ip.addParameter('snapshot_interval',...
                                         10000,          @isscalar);
-    ip.addParamValue('solver_def_file', fullfile(pwd, 'models', 'Zeiler_conv5', 'solver.prototxt'), ...
+    ip.addParameter('solver_def_file', fullfile(pwd, 'models', 'Zeiler_conv5', 'solver.prototxt'), ...
                                                         @isstr);
-    ip.addParamValue('net_def_file',    fullfile(pwd, 'models', 'Zeiler_conv5', 'train_val.prototxt'), ...
+    ip.addParameter('net_def_file',    fullfile(pwd, 'models', 'Zeiler_conv5', 'train_val.prototxt'), ...
                                                         @isstr);                                                    
-    ip.addParamValue('net_file',        fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'), ...
+    ip.addParameter('net_file',        fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'), ...
                                                         @isstr);
-    ip.addParamValue('cache_name',      'Zeiler_conv5', @isstr);
-    ip.addParamValue('shouldContinue',  false, @isscalar);
+    ip.addParameter('cache_name',      'Zeiler_conv5', @isstr);
+    ip.addParameter('shouldContinue',  false, @isscalar);
     
     ip.parse(conf, imdb_train, roidb_train, varargin{:});
     opts = ip.Results;
@@ -142,10 +142,17 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
         fprintf('Done.\n');
 
         % fix validation data
-        shuffled_inds_val = generate_random_minibatch([], image_roidb_val, conf.ims_per_batch);
+        shuffled_inds_val = generate_random_minibatch([], image_roidb_val, ...
+            conf.ims_per_batch, conf.batch_size);
         shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), min(opts.val_iters, length(shuffled_inds_val))));
     end
-    
+%% update scale values
+    if conf.keep_scale
+        % set scales based on images dimensions
+        im_size_all = reshape([image_roidb_train.im_size]', [2 length(image_roidb_train)]);
+        conf.scales = unique(min(im_size_all, [], 1));
+    end
+
 %%  try to train/val with images which have maximum size potentially, to validate whether the gpu memory is enough  
     num_classes = size(image_roidb_train(1).overlap, 2);
     check_gpu_memory(conf, caffe_solver, num_classes, opts.do_val);
@@ -160,7 +167,8 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
         caffe_solver.net.set_phase('train');
 
         % generate minibatch training data
-        [shuffled_inds, sub_db_inds] = generate_random_minibatch(shuffled_inds, image_roidb_train, conf.ims_per_batch);
+        [shuffled_inds, sub_db_inds] = generate_random_minibatch(shuffled_inds, image_roidb_train, ...
+            conf.ims_per_batch, conf.batch_size);
         [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
             fast_rcnn_get_minibatch(conf, image_roidb_train(sub_db_inds));
 
@@ -191,7 +199,7 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
                     caffe_solver.net.forward(net_inputs);
                     
                     rst = caffe_solver.net.get_output();
-                     val_results = parse_rst(val_results, rst);
+                    val_results = parse_rst(val_results, rst);
                 end
             end
             
@@ -222,7 +230,7 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
     rng(prev_rng);
 end
 
-function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, image_roidb_train, ims_per_batch)
+function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, image_roidb, ims_per_batch, batch_size)
 
     % shuffle training data per batch
     if isempty(shuffled_inds)
@@ -230,17 +238,23 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
         % images, to save gpu memory
         
         shuffled_inds = [];
-        hori_image_inds = arrayfun(@(x) x.im_size(2) >= x.im_size(1), image_roidb_train, 'UniformOutput', true);
+        hori_image_inds = arrayfun(@(x) x.im_size(2) >= x.im_size(1), image_roidb, 'UniformOutput', true);
         hori_image_inds = hori_image_inds(:);
         image_indices = {find(hori_image_inds), find(~hori_image_inds)};
         % looking for images with at least one roi of any class
         % in each batch we will choose at least half such images
-        pos_image_indices = arrayfun(@(x) nnz(x.class) > 0, image_roidb_train);
+        pos_image_indices = arrayfun(@(x) nnz(x.class) > 0, image_roidb);
         pos_image_indices = pos_image_indices(:);
         
+        % number of samples per image
+        num_samples = arrayfun(@(x) sum(x.class == 0), image_roidb);
+
         % seperate generation for horizontal/vertical
         for k = 1:2
             image_indices_ = image_indices{k}(:);
+            if isempty(image_indices_)
+                continue;
+            end
             
             image_indices_pos = find(pos_image_indices(image_indices_));
             pos_frac = length(image_indices_pos) / length(image_indices_);
@@ -254,22 +268,33 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
                     image_indices_pos_rep(randperm(length(image_indices_pos_rep), add_pos))];
             end
             
-            % random perm
-            lim = floor(length(image_indices_) / ims_per_batch) * ims_per_batch;
-            image_indices_ = image_indices_(randperm(length(image_indices_), lim));
-            % combine sample for each ims_per_batch 
-            image_indices_ = reshape(image_indices_, ims_per_batch, []);
-            shuffled_inds = [shuffled_inds, image_indices_];
+            % split to groups by num_samples
+            [C, ~, ic] = unique(num_samples(image_indices_));
+            for i_group = 1:length(C)
+                image_indices__ = image_indices_(ic == i_group);
+                ims_per_batch_ = ims_per_batch;
+                if (C(i_group)*ims_per_batch_ < batch_size)
+                    % we don't have enough samples to reach batch_size
+                    ims_per_batch_ = round(batch_size / C(i_group));
+                end
+                
+                % random perm
+                lim = floor(length(image_indices__) / ims_per_batch_) * ims_per_batch_;
+                image_indices__ = image_indices__(randperm(length(image_indices__), lim));
+                % combine sample for each ims_per_batch 
+                image_indices__ = reshape(image_indices__, ims_per_batch_, []);
+                shuffled_inds = [shuffled_inds, num2cell(image_indices__, 1)];
+            end
+            
+            % shuffle batches order
+            shuffled_inds = shuffled_inds(randperm(length(shuffled_inds)));
         end
-        
-        shuffled_inds = shuffled_inds(:, randperm(size(shuffled_inds, 2)));
-        shuffled_inds = num2cell(shuffled_inds, 1);
     end
     
     if nargout > 1
         % generate minibatch training data
         sub_inds = shuffled_inds{1};
-        assert(length(sub_inds) == ims_per_batch);
+        % assert(length(sub_inds) == ims_per_batch);
         shuffled_inds(1) = [];
     end
 end
