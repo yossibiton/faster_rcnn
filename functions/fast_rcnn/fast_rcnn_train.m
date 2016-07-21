@@ -1,4 +1,4 @@
-function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
+function [save_model_path, perf, cache_dir] = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
 % save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
 % --------------------------------------------------------
 % Fast R-CNN
@@ -94,6 +94,8 @@ function [save_model_path, perf] = fast_rcnn_train(conf, imdb_train, roidb_train
     % first copy solver & network file to output dir
     copyfile(opts.net_def_file, fullfile(cache_dir, 'train_val.prototxt'));
     copyfile(opts.solver_def_file, fullfile(cache_dir, 'solver.prototxt'));
+    mean_image = conf.image_means;
+    save(fullfile(cache_dir, 'mean_value.mat'), 'mean_image');
     
     % init log
     timestamp = datestr(datevec(now()), 'yyyymmdd_HHMMSS');
@@ -256,6 +258,7 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
                 continue;
             end
             
+            % keep balanced batches
             image_indices_pos = find(pos_image_indices(image_indices_));
             pos_frac = length(image_indices_pos) / length(image_indices_);
             if (pos_frac < 0.5)
@@ -266,6 +269,8 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
                 image_indices_pos_rep = repmat(image_indices_pos, ceil(rep_factor), 1);
                 image_indices_ = [image_indices_; ...
                     image_indices_pos_rep(randperm(length(image_indices_pos_rep), add_pos))];
+            else
+                % replicate "negative" images in order to have balanced sampling
             end
             
             % split to groups by num_samples

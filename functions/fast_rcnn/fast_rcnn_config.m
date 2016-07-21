@@ -35,7 +35,7 @@ function conf = fast_rcnn_config(varargin)
     ip.addParameter('bg_thresh_hi',    0.5,            @isscalar);
     ip.addParameter('bg_thresh_lo',    0.1,            @isscalar);
     % mean image, in RGB order
-    ip.addParameter('image_means',     128,            @ismatrix);
+    ip.addParameter('image_means',     128,            @isnumeric);
     % Use horizontally-flipped images during training?
     ip.addParameter('use_flipped',     true,           @islogical);
     % Vaild training sample (IoU > bbox_thresh) for bounding box regresion
