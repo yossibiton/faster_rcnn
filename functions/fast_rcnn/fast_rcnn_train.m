@@ -1,4 +1,5 @@
-function [save_model_path, perf, cache_dir] = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
+function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
+    fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
 % save_model_path = fast_rcnn_train(conf, imdb_train, roidb_train, varargin)
 % --------------------------------------------------------
 % Fast R-CNN
@@ -35,6 +36,8 @@ function [save_model_path, perf, cache_dir] = fast_rcnn_train(conf, imdb_train, 
     
     cache_dir = fullfile(pwd, 'output', 'fast_rcnn_cachedir', opts.cache_name, imdbs_name);
     cache_dir_imdb = fullfile(pwd, 'imdb', 'cache');
+    db_train_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name '.mat']);
+    db_val_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name_val '.mat']);
     
     save_model_path = fullfile(cache_dir, 'final');
     perf_path = fullfile(cache_dir, 'perf.mat');
@@ -121,8 +124,6 @@ function [save_model_path, perf, cache_dir] = fast_rcnn_train(conf, imdb_train, 
     
 %% making tran/val data
     fprintf('Preparing training data...');
-    db_train_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name '.mat']);
-    
     if exist(db_train_path, 'file')
         load(db_train_path, 'image_roidb_train', 'bbox_means', 'bbox_stds');
     else
@@ -134,8 +135,6 @@ function [save_model_path, perf, cache_dir] = fast_rcnn_train(conf, imdb_train, 
     
     if opts.do_val
         fprintf('Preparing validation data...');
-        db_val_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name_val '.mat']);
-        
         if exist(db_val_path, 'file')
             load(db_val_path, 'image_roidb_val');
         else
