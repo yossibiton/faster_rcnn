@@ -1,13 +1,10 @@
-cp setup/Makefile.config external/caffe
-cd external/caffe
-git apply ../../setup/0001-upgrading-matlab-interface-by-adding-new-methods-to-.patch
+target_dir=../caffe_Austriker
+git clone -b fast-rcnn https://github.com/Austriker/caffe $target_dir
+cp setup/0001-upgrading-matlab-interface-by-adding-new-methods-to-.patch $target_dir/matlab_interface.patch
+cp setup/Makefile.config $target_dir
+cd $target_dir
+git apply matlab_interface.patch
 
-echo "add manually -D_FORCE_INLINES to NVCCFLAGS in external/caffe/Makefile"
-echo " add the following lines to caffe/src/caffe/util/upgrade_proto.cpp, function UpgradeV1LayerType :
-  case V1LayerParameter_LayerType_RESHAPE:
-    return "Reshape";
-  case V1LayerParameter_LayerType_ROIPOOLING:
-    return "ROIPooling";
-  case V1LayerParameter_LayerType_SMOOTH_L1_LOSS:
-    return "SmoothL1Loss";
-    "
+echo "Please build caffe version in $target_dir ('make all' and then 'make matcaffe')"
+echo "Recommended prerequisites : OpenBLAS, cuda-8.0, cudnn-5.1"
+    

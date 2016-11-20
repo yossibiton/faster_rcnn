@@ -1,4 +1,0 @@
-[submodule "external/caffe"]
-	path = external/caffe
-	url = https://github.com/Austriker/caffe
-	branch = fast-rcnn
