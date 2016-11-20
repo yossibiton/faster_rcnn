@@ -1,0 +1,624 @@
+From 5f83539a7c6a7889958ee08f4643a6d3989bf062 Mon Sep 17 00:00:00 2001
+From: Yossi Biton <yossi.biton@adasky.com>
+Date: Sun, 20 Nov 2016 14:11:55 +0200
+Subject: [PATCH] upgrading matlab interface by adding new methods to matlab
+ class Net
+
+---
+ Makefile                         |  12 ++-
+ include/caffe/layer.hpp          |   7 ++
+ include/caffe/net.hpp            |  12 +++
+ include/caffe/solver.hpp         |   1 +
+ matlab/+caffe/Layer.m            |   3 +
+ matlab/+caffe/Net.m              |  60 +++++++++++
+ matlab/+caffe/Solver.m           |   3 +
+ matlab/+caffe/init_log.m         |  15 +++
+ matlab/+caffe/private/caffe_.cpp | 210 ++++++++++++++++++++++++++++++++-------
+ matlab/+caffe/set_random_seed.m  |  11 ++
+ src/caffe/net.cpp                |  10 ++
+ 11 files changed, 305 insertions(+), 39 deletions(-)
+ create mode 100644 matlab/+caffe/init_log.m
+ create mode 100644 matlab/+caffe/set_random_seed.m
+
+diff --git a/Makefile b/Makefile
+index 403e00a..4e611ec 100644
+--- a/Makefile
++++ b/Makefile
+@@ -406,6 +406,14 @@ CXXFLAGS += -pthread -fPIC $(COMMON_FLAGS) $(WARNINGS)
+ NVCCFLAGS += -ccbin=$(CXX) -Xcompiler -fPIC $(COMMON_FLAGS)
+ # mex may invoke an older gcc that is too liberal with -Wuninitalized
+ MATLAB_CXXFLAGS := $(CXXFLAGS) -Wno-uninitialized
++ifneq ($(CPU_ONLY), 1)
++	# required for compiling with support for mxGPUArray
++	MATLAB_INCLUDE := -I$(MATLAB_DIR)/toolbox/distcomp/gpu/extern/include
++	MATLAB_LIBS := -lmwgpu
++else
++	MATLAB_INCLUDE :=
++	MATLAB_LIBS :=
++endif
+ LINKFLAGS += -pthread -fPIC $(COMMON_FLAGS) $(WARNINGS)
+ 
+ USE_PKG_CONFIG ?= 0
+@@ -514,7 +522,9 @@ $(MAT$(PROJECT)_SO): $(MAT$(PROJECT)_SRC) $(STATIC_NAME)
+ 	$(Q)$(MATLAB_DIR)/bin/mex $(MAT$(PROJECT)_SRC) \
+ 			CXX="$(CXX)" \
+ 			CXXFLAGS="\$$CXXFLAGS $(MATLAB_CXXFLAGS)" \
+-			CXXLIBS="\$$CXXLIBS $(STATIC_LINK_COMMAND) $(LDFLAGS)" -output $@
++			INCLUDE="\$$INCLUDE $(MATLAB_INCLUDE)" \
++			CXXLIBS="\$$CXXLIBS $(STATIC_LINK_COMMAND) $(LDFLAGS) $(MATLAB_LIBS)" \
++			-output $@
+ 	@ if [ -f "$(PROJECT)_.d" ]; then \
+ 		mv -f $(PROJECT)_.d $(BUILD_DIR)/${MAT$(PROJECT)_SO:.$(MAT_SO_EXT)=.d}; \
+ 	fi
+diff --git a/include/caffe/layer.hpp b/include/caffe/layer.hpp
+index ddf8823..d75e4d2 100644
+--- a/include/caffe/layer.hpp
++++ b/include/caffe/layer.hpp
+@@ -318,6 +318,13 @@ class Layer {
+ 
+   inline Phase phase() { return phase_; }
+ 
++  /**
++   * @brief set phase
++   *		   enable train and test with one network, for saving memory
++   */
++  virtual inline void set_phase(Phase phase){
++    phase_ = phase;
++  }  
+ 
+  protected:
+   /** The protobuf that stores the layer parameters */
+diff --git a/include/caffe/net.hpp b/include/caffe/net.hpp
+index 493bdf2..dbbacf0 100644
+--- a/include/caffe/net.hpp
++++ b/include/caffe/net.hpp
+@@ -32,6 +32,10 @@ class Net {
+   /// @brief Initialize a network with a NetParameter.
+   void Init(const NetParameter& param);
+ 
++  /// @brief set phase
++  ///        enable train and test with one network, for saving memory
++  void SetPhase(Phase phase);
++
+   /**
+    * @brief Run Forward and return the result.
+    *
+@@ -150,6 +154,14 @@ class Net {
+   inline const vector<vector<Blob<Dtype>*> >& top_vecs() const {
+     return top_vecs_;
+   }
++  /// @brief returns the bottom vecs ids for each layer
++  inline const vector<vector<int> >& bottom_id_vecs() const {
++     return bottom_id_vecs_;
++  }
++  /// @brief returns the top vecs ids for each layer
++  inline const vector<vector<int> >& top_id_vecs() const {
++    return top_id_vecs_;
++  }
+   /// @brief returns the ids of the top blobs of layer i
+   inline const vector<int> & top_ids(int i) const {
+     CHECK_GE(i, 0) << "Invalid layer id";
+diff --git a/include/caffe/solver.hpp b/include/caffe/solver.hpp
+index 38259ed..aec01bc 100644
+--- a/include/caffe/solver.hpp
++++ b/include/caffe/solver.hpp
+@@ -73,6 +73,7 @@ class Solver {
+     return test_nets_;
+   }
+   int iter() { return iter_; }
++  int max_iter() const { return param_.max_iter(); }
+ 
+   // Invoked at specific points during an iteration
+   class Callback {
+diff --git a/matlab/+caffe/Layer.m b/matlab/+caffe/Layer.m
+index 4c20231..2122648 100644
+--- a/matlab/+caffe/Layer.m
++++ b/matlab/+caffe/Layer.m
+@@ -25,6 +25,9 @@ classdef Layer < handle
+         self.params(n) = caffe.Blob(self.attributes.hBlob_blobs(n));
+       end
+     end
++    function set_params_data(self, blob_index, params)
++        caffe.Blob(self.attributes.hBlob_blobs(blob_index)).set_data(params);
++    end
+     function layer_type = type(self)
+       layer_type = caffe_('layer_get_type', self.hLayer_self);
+     end
+diff --git a/matlab/+caffe/Net.m b/matlab/+caffe/Net.m
+index e6295bb..7749e98 100644
+--- a/matlab/+caffe/Net.m
++++ b/matlab/+caffe/Net.m
+@@ -21,6 +21,8 @@ classdef Net < handle
+     name2blob_index
+     layer_names
+     blob_names
++    bottom_id_vecs
++    top_id_vecs
+   end
+   
+   methods
+@@ -67,6 +69,23 @@ classdef Net < handle
+       % expose layer_names and blob_names for public read access
+       self.layer_names = self.attributes.layer_names;
+       self.blob_names = self.attributes.blob_names;
++
++      % expose bottom_id_vecs and top_id_vecs for public read access
++      self.attributes.bottom_id_vecs = cellfun(@(x) x+1, self.attributes.bottom_id_vecs, 'UniformOutput', false);
++      self.bottom_id_vecs = self.attributes.bottom_id_vecs;
++      self.attributes.top_id_vecs = cellfun(@(x) x+1, self.attributes.top_id_vecs, 'UniformOutput', false);
++      self.top_id_vecs = self.attributes.top_id_vecs;
++    end
++    function set_phase(self, phase_name)
++      CHECK(ischar(phase_name), 'phase_name must be a string');
++      CHECK(strcmp(phase_name, 'train') || strcmp(phase_name, 'test'), ...
++            sprintf('phase_name can only be %strain%s or %stest%s', ...
++            char(39), char(39), char(39), char(39)));
++      caffe_('net_set_phase', self.hNet_self, phase_name);
++    end
++    function share_weights_with(self, net)
++      CHECK(is_valid_handle(net.hNet_net), 'invalid Net handle');
++      caffe_('net_share_trained_layers_with', self.hNet_net, net.hNet_net);
+     end
+     function layer = layers(self, layer_name)
+       CHECK(ischar(layer_name), 'layer_name must be a string');
+@@ -81,18 +100,43 @@ classdef Net < handle
+       CHECK(isscalar(blob_index), 'blob_index must be a scalar');
+       blob = self.layer_vec(self.name2layer_index(layer_name)).params(blob_index);
+     end
++    function set_params_data(self, layer_name, blob_index, data)
++      CHECK(ischar(layer_name), 'layer_name must be a string');
++      CHECK(isscalar(blob_index), 'blob_index must be a scalar');
++      self.layer_vec(self.name2layer_index(layer_name)).set_params_data(blob_index, data);
++    end
+     function forward_prefilled(self)
+       caffe_('net_forward', self.hNet_self);
+     end
+     function backward_prefilled(self)
+       caffe_('net_backward', self.hNet_self);
+     end
++    function set_input_data(self, input_data)
++      CHECK(iscell(input_data), 'input_data must be a cell array');
++      CHECK(length(input_data) == length(self.inputs), ...
++        'input data cell length must match input blob number');
++      % copy data to input blobs
++      for n = 1:length(self.inputs)
++        self.blobs(self.inputs{n}).set_data(input_data{n});
++      end
++    end
++    function res = get_output(self)
++      % get onput blobs
++      res = struct('blob_name', '', 'data', []);
++      for n = 1:length(self.outputs)
++        res(n).blob_name = self.outputs{n};
++        res(n).data = self.blobs(self.outputs{n}).get_data();
++      end
++    end
+     function res = forward(self, input_data)
+       CHECK(iscell(input_data), 'input_data must be a cell array');
+       CHECK(length(input_data) == length(self.inputs), ...
+         'input data cell length must match input blob number');
+       % copy data to input blobs
+       for n = 1:length(self.inputs)
++        if isempty(input_data{n})
++            continue;
++        end
+         self.blobs(self.inputs{n}).set_data(input_data{n});
+       end
+       self.forward_prefilled();
+@@ -122,9 +166,25 @@ classdef Net < handle
+       CHECK_FILE_EXIST(weights_file);
+       caffe_('net_copy_from', self.hNet_self, weights_file);
+     end
++
+     function reshape(self)
+       caffe_('net_reshape', self.hNet_self);
+     end
++    function reshape_as_input(self, input_data)
++      CHECK(iscell(input_data), 'input_data must be a cell array');
++      CHECK(length(input_data) == length(self.inputs), ...
++        'input data cell length must match input blob number');
++      % reshape input blobs
++      for n = 1:length(self.inputs)
++        if isempty(input_data{n})
++            continue;
++        end
++        input_data_size = size(input_data{n});
++        input_data_size_extended = [input_data_size, ones(1, 4 - length(input_data_size))];
++        self.blobs(self.inputs{n}).reshape(input_data_size_extended);
++      end
++      self.reshape();
++    end
+     function save(self, weights_file)
+       CHECK(ischar(weights_file), 'weights_file must be a string');
+       caffe_('net_save', self.hNet_self, weights_file);
+diff --git a/matlab/+caffe/Solver.m b/matlab/+caffe/Solver.m
+index f8bdc4e..1fe76b9 100644
+--- a/matlab/+caffe/Solver.m
++++ b/matlab/+caffe/Solver.m
+@@ -39,6 +39,9 @@ classdef Solver < handle
+     function iter = iter(self)
+       iter = caffe_('solver_get_iter', self.hSolver_self);
+     end
++    function max_iter = max_iter(self)
++      max_iter = caffe_('solver_get_max_iter', self.hSolver_self);
++    end
+     function restore(self, snapshot_filename)
+       CHECK(ischar(snapshot_filename), 'snapshot_filename must be a string');
+       CHECK_FILE_EXIST(snapshot_filename);
+diff --git a/matlab/+caffe/init_log.m b/matlab/+caffe/init_log.m
+new file mode 100644
+index 0000000..406b4f1
+--- /dev/null
++++ b/matlab/+caffe/init_log.m
+@@ -0,0 +1,15 @@
++function init_log(log_base_filename)
++% init_log(log_base_filename)
++%   init Caffe's log
++
++CHECK(ischar(log_base_filename) && ~isempty(log_base_filename), ...
++  'log_base_filename must be string');
++
++[log_base_dir] = fileparts(log_base_filename);
++if ~exist(log_base_dir, 'dir')
++    mkdir(log_base_dir);
++end
++
++caffe_('init_log', log_base_filename);
++
++end
+diff --git a/matlab/+caffe/private/caffe_.cpp b/matlab/+caffe/private/caffe_.cpp
+index 1b1b2bf..ce1ad88 100644
+--- a/matlab/+caffe/private/caffe_.cpp
++++ b/matlab/+caffe/private/caffe_.cpp
+@@ -14,6 +14,7 @@
+ #include <vector>
+ 
+ #include "mex.h"
++#include "gpu/mxGPUArray.h"
+ 
+ #include "caffe/caffe.hpp"
+ 
+@@ -56,9 +57,21 @@ enum WhichMemory { DATA, DIFF };
+ // Copy matlab array to Blob data or diff
+ static void mx_mat_to_blob(const mxArray* mx_mat, Blob<float>* blob,
+     WhichMemory data_or_diff) {
+-  mxCHECK(blob->count() == mxGetNumberOfElements(mx_mat),
+-      "number of elements in target blob doesn't match that in input mxArray");
+-  const float* mat_mem_ptr = reinterpret_cast<const float*>(mxGetData(mx_mat));
++
++  const float* mat_mem_ptr = NULL;
++  mxGPUArray const *mx_mat_gpu;
++  if (mxIsGPUArray(mx_mat)){
++	  mxInitGPU();
++	  mx_mat_gpu = mxGPUCreateFromMxArray(mx_mat);
++	  mat_mem_ptr = reinterpret_cast<const float*>(mxGPUGetDataReadOnly(mx_mat_gpu));
++	  mxCHECK(blob->count() == mxGPUGetNumberOfElements(mx_mat_gpu),
++		  "number of elements in target blob doesn't match that in input mxArray");
++  }
++  else{
++	  mxCHECK(blob->count() == mxGetNumberOfElements(mx_mat),
++		  "number of elements in target blob doesn't match that in input mxArray");
++	  mat_mem_ptr = reinterpret_cast<const float*>(mxGetData(mx_mat));
++  }
+   float* blob_mem_ptr = NULL;
+   switch (Caffe::mode()) {
+   case Caffe::CPU:
+@@ -73,6 +86,10 @@ static void mx_mat_to_blob(const mxArray* mx_mat, Blob<float>* blob,
+     mxERROR("Unknown Caffe mode");
+   }
+   caffe_copy(blob->count(), mat_mem_ptr, blob_mem_ptr);
++
++  if (mxIsGPUArray(mx_mat)){
++	  mxGPUDestroyGPUArray(mx_mat_gpu);
++  }
+ }
+ 
+ // Copy Blob data or diff to matlab array
+@@ -116,6 +133,16 @@ static mxArray* int_vec_to_mx_vec(const vector<int>& int_vec) {
+   return mx_vec;
+ }
+ 
++
++// Convert vector<vector<int> > to matlab cell of (row vector)s
++static mxArray* int_vec_vec_to_mx_cell_vec(const vector<vector<int> >& int_vec_vec) {
++	mxArray* mx_cell_vec = mxCreateCellMatrix(int_vec_vec.size(), 1);
++	for (int i = 0; i < int_vec_vec.size(); i++){
++		mxSetCell(mx_cell_vec, i, int_vec_to_mx_vec(int_vec_vec[i]));
++	}
++	return mx_cell_vec;
++}
++
+ // Convert vector<string> to matlab cell vector of strings
+ static mxArray* str_vec_to_mx_strcell(const vector<std::string>& str_vec) {
+   mxArray* mx_strcell = mxCreateCellMatrix(str_vec.size(), 1);
+@@ -221,6 +248,14 @@ static void solver_get_iter(MEX_ARGS) {
+   plhs[0] = mxCreateDoubleScalar(solver->iter());
+ }
+ 
++// Usage: caffe_('solver_get_max_iter', hSolver)
++static void solver_get_max_iter(MEX_ARGS) {
++	mxCHECK(nrhs == 1 && mxIsStruct(prhs[0]),
++		"Usage: caffe_('solver_get_max_iter', hSolver)");
++	Solver<float>* solver = handle_to_ptr<Solver<float> >(prhs[0]);
++	plhs[0] = mxCreateDoubleScalar(solver->max_iter());
++}
++
+ // Usage: caffe_('solver_restore', hSolver, snapshot_file)
+ static void solver_restore(MEX_ARGS) {
+   mxCHECK(nrhs == 2 && mxIsStruct(prhs[0]) && mxIsChar(prhs[1]),
+@@ -271,14 +306,34 @@ static void get_net(MEX_ARGS) {
+   mxFree(phase_name);
+ }
+ 
++// Usage: caffe_('net_set_phase', hNet, phase_name)
++static void net_set_phase(MEX_ARGS) {
++	mxCHECK(nrhs == 2 && mxIsStruct(prhs[0]) && mxIsChar(prhs[1]),
++		"Usage: caffe_('net_set_phase', hNet, phase_name)");
++	Net<float>* net = handle_to_ptr<Net<float> >(prhs[0]);
++	char* phase_name = mxArrayToString(prhs[1]);
++	Phase phase;
++	if (strcmp(phase_name, "train") == 0) {
++		phase = TRAIN;
++	}
++	else if (strcmp(phase_name, "test") == 0) {
++		phase = TEST;
++	}
++	else {
++		mxERROR("Unknown phase");
++	}
++	net->SetPhase(phase);
++	mxFree(phase_name);
++}
++
+ // Usage: caffe_('net_get_attr', hNet)
+ static void net_get_attr(MEX_ARGS) {
+   mxCHECK(nrhs == 1 && mxIsStruct(prhs[0]),
+       "Usage: caffe_('net_get_attr', hNet)");
+   Net<float>* net = handle_to_ptr<Net<float> >(prhs[0]);
+-  const int net_attr_num = 6;
++  const int net_attr_num = 8;
+   const char* net_attrs[net_attr_num] = { "hLayer_layers", "hBlob_blobs",
+-      "input_blob_indices", "output_blob_indices", "layer_names", "blob_names"};
++	  "input_blob_indices", "output_blob_indices", "layer_names", "blob_names", "bottom_id_vecs", "top_id_vecs" };
+   mxArray* mx_net_attr = mxCreateStructMatrix(1, 1, net_attr_num,
+       net_attrs);
+   mxSetField(mx_net_attr, 0, "hLayer_layers",
+@@ -293,6 +348,10 @@ static void net_get_attr(MEX_ARGS) {
+       str_vec_to_mx_strcell(net->layer_names()));
+   mxSetField(mx_net_attr, 0, "blob_names",
+       str_vec_to_mx_strcell(net->blob_names()));
++  mxSetField(mx_net_attr, 0, "bottom_id_vecs",
++	  int_vec_vec_to_mx_cell_vec(net->bottom_id_vecs()));
++  mxSetField(mx_net_attr, 0, "top_id_vecs",
++	  int_vec_vec_to_mx_cell_vec(net->top_id_vecs()));
+   plhs[0] = mx_net_attr;
+ }
+ 
+@@ -323,6 +382,15 @@ static void net_copy_from(MEX_ARGS) {
+   mxFree(weights_file);
+ }
+ 
++// Usage: caffe_('net_shared_with', hNet, hNet_trained)
++static void net_share_trained_layers_with(MEX_ARGS) {
++	mxCHECK(nrhs == 2 && mxIsStruct(prhs[0]) && mxIsStruct(prhs[1]),
++		"Usage: caffe_('net_shared_with', hNet, hNet_trained)");
++	Net<float>* net = handle_to_ptr<Net<float> >(prhs[0]);
++	Net<float>* net_trained = handle_to_ptr<Net<float> >(prhs[1]);
++	net->ShareTrainedLayersWith(net_trained);
++}
++
+ // Usage: caffe_('net_reshape', hNet)
+ static void net_reshape(MEX_ARGS) {
+   mxCHECK(nrhs == 1 && mxIsStruct(prhs[0]),
+@@ -406,12 +474,24 @@ static void blob_get_data(MEX_ARGS) {
+ 
+ // Usage: caffe_('blob_set_data', hBlob, new_data)
+ static void blob_set_data(MEX_ARGS) {
+-  mxCHECK(nrhs == 2 && mxIsStruct(prhs[0]) && mxIsSingle(prhs[1]),
++  mxCHECK(nrhs == 2 && mxIsStruct(prhs[0]) && (mxIsSingle(prhs[1]) || mxIsGPUArray(prhs[1])),
+       "Usage: caffe_('blob_set_data', hBlob, new_data)");
+   Blob<float>* blob = handle_to_ptr<Blob<float> >(prhs[0]);
+   mx_mat_to_blob(prhs[1], blob, DATA);
+ }
+ 
++// Usage: caffe_('blob_copy_data', hBlob_to, hBlob_from)
++static void blob_copy_data(MEX_ARGS) {
++	mxCHECK(nrhs == 2 && mxIsStruct(prhs[0]) && mxIsStruct(prhs[1]),
++		"Usage: caffe_('blob_copy_data', hBlob_to, hBlob_from)");
++	Blob<float>* blob_to = handle_to_ptr<Blob<float> >(prhs[0]);
++	Blob<float>* blob_from = handle_to_ptr<Blob<float> >(prhs[1]);
++	//mxCHECK(blob_from->count() == blob_to->count(),
++	//	"number of elements in target blob doesn't match that in source blob");
++
++	blob_to->CopyFrom(*blob_from, false, true);
++}
++
+ // Usage: caffe_('blob_get_diff', hBlob)
+ static void blob_get_diff(MEX_ARGS) {
+   mxCHECK(nrhs == 1 && mxIsStruct(prhs[0]),
+@@ -466,6 +546,54 @@ static void reset(MEX_ARGS) {
+   init_key = static_cast<double>(caffe_rng_rand());
+ }
+ 
++// Usage: caffe_('set_random_seed', random_seed)
++static void set_random_seed(MEX_ARGS) {
++	mxCHECK(nrhs == 1 && mxIsDouble(prhs[0]),
++		"Usage: caffe_('set_random_seed', random_seed)");
++	int random_seed = static_cast<unsigned int>(mxGetScalar(prhs[0]));
++	Caffe::set_random_seed(random_seed);
++}
++
++static void glog_failure_handler(){
++	static bool is_glog_failure = false;
++	if (!is_glog_failure)
++	{
++		is_glog_failure = true;
++		::google::FlushLogFiles(0);
++		mexErrMsgTxt("glog check error, please check log and clear mex");
++	}
++}
++
++static void protobuf_log_handler(::google::protobuf::LogLevel level, const char* filename, int line,
++	const std::string& message)
++{
++	const int max_err_length = 512;
++	char err_message[max_err_length];
++	snprintf(err_message, max_err_length, "Protobuf : %s . at %s Line %d",
++           message.c_str(), filename, line);
++	LOG(INFO) << err_message;
++	::google::FlushLogFiles(0);
++	mexErrMsgTxt(err_message);
++}
++
++// Usage: caffe_('init_log', log_base_filename)
++static void init_log(MEX_ARGS) {
++	static bool is_log_inited = false;
++
++	mxCHECK(nrhs == 1 && mxIsChar(prhs[0]),
++		"Usage: caffe_('init_log', log_dir)");
++	if (is_log_inited)
++		::google::ShutdownGoogleLogging();
++	char* log_base_filename = mxArrayToString(prhs[0]);
++	::google::SetLogDestination(0, log_base_filename);
++	mxFree(log_base_filename);
++	::google::protobuf::SetLogHandler(&protobuf_log_handler);
++	::google::InitGoogleLogging("caffe_mex");
++	::google::InstallFailureFunction(&glog_failure_handler);
++
++	is_log_inited = true;
++}
++
+ // Usage: caffe_('read_mean', mean_proto_file)
+ static void read_mean(MEX_ARGS) {
+   mxCHECK(nrhs == 1 && mxIsChar(prhs[0]),
+@@ -521,37 +649,43 @@ struct handler_registry {
+ 
+ static handler_registry handlers[] = {
+   // Public API functions
+-  { "get_solver",         get_solver      },
+-  { "solver_get_attr",    solver_get_attr },
+-  { "solver_get_iter",    solver_get_iter },
+-  { "solver_restore",     solver_restore  },
+-  { "solver_solve",       solver_solve    },
+-  { "solver_step",        solver_step     },
+-  { "get_net",            get_net         },
+-  { "net_get_attr",       net_get_attr    },
+-  { "net_forward",        net_forward     },
+-  { "net_backward",       net_backward    },
+-  { "net_copy_from",      net_copy_from   },
+-  { "net_reshape",        net_reshape     },
+-  { "net_save",           net_save        },
+-  { "layer_get_attr",     layer_get_attr  },
+-  { "layer_get_type",     layer_get_type  },
+-  { "blob_get_shape",     blob_get_shape  },
+-  { "blob_reshape",       blob_reshape    },
+-  { "blob_get_data",      blob_get_data   },
+-  { "blob_set_data",      blob_set_data   },
+-  { "blob_get_diff",      blob_get_diff   },
+-  { "blob_set_diff",      blob_set_diff   },
+-  { "set_mode_cpu",       set_mode_cpu    },
+-  { "set_mode_gpu",       set_mode_gpu    },
+-  { "set_device",         set_device      },
+-  { "get_init_key",       get_init_key    },
+-  { "reset",              reset           },
+-  { "read_mean",          read_mean       },
+-  { "write_mean",         write_mean      },
+-  { "version",            version         },
++  { "get_solver",                    get_solver                     },
++  { "solver_get_attr",               solver_get_attr                },
++  { "solver_get_iter",               solver_get_iter                },
++  { "solver_get_max_iter",           solver_get_max_iter            },
++  { "solver_restore",                solver_restore                 },
++  { "solver_solve",                  solver_solve                   },
++  { "solver_step",                   solver_step                    },
++  { "get_net",                       get_net                        },
++  { "net_get_attr",                  net_get_attr                   },
++  { "net_set_phase",                 net_set_phase                  },
++  { "net_forward",                   net_forward                    },
++  { "net_backward",                  net_backward                   },
++  { "net_copy_from",                 net_copy_from                  },
++  { "net_share_trained_layers_with", net_share_trained_layers_with  },
++  { "net_reshape",                   net_reshape                    },
++  { "net_save",                      net_save                       },
++  { "layer_get_attr",                layer_get_attr                 },
++  { "layer_get_type",                layer_get_type                 },
++  { "blob_get_shape",                blob_get_shape                 },
++  { "blob_reshape",                  blob_reshape                   },
++  { "blob_get_data",                 blob_get_data                  },
++  { "blob_set_data",                 blob_set_data                  },
++  { "blob_copy_data",				 blob_copy_data					},
++  { "blob_get_diff",                 blob_get_diff                  },
++  { "blob_set_diff",                 blob_set_diff                  },
++  { "set_mode_cpu",                  set_mode_cpu                   },
++  { "set_mode_gpu",                  set_mode_gpu                   },
++  { "set_device",                    set_device                     },
++  { "set_random_seed",               set_random_seed                },
++  { "get_init_key",                  get_init_key                   },
++  { "init_log",                      init_log                       },
++  { "reset",                         reset                          },
++  { "read_mean",                     read_mean                      },
++  { "write_mean",                    write_mean                     },
++  { "version",                       version                        },
+   // The end.
+-  { "END",                NULL            },
++  { "END",                           NULL                           },
+ };
+ 
+ /** -----------------------------------------------------------------
+@@ -559,7 +693,7 @@ static handler_registry handlers[] = {
+  **/
+ // Usage: caffe_(api_command, arg1, arg2, ...)
+ void mexFunction(MEX_ARGS) {
+-  mexLock();  // Avoid clearing the mex file.
++  //mexLock();  // Avoid clearing the mex file.
+   mxCHECK(nrhs > 0, "Usage: caffe_(api_command, arg1, arg2, ...)");
+   // Handle input command
+   char* cmd = mxArrayToString(prhs[0]);
+@@ -578,4 +712,4 @@ void mexFunction(MEX_ARGS) {
+     mxERROR(error_msg.str().c_str());
+   }
+   mxFree(cmd);
+-}
++}
+\ No newline at end of file
+diff --git a/matlab/+caffe/set_random_seed.m b/matlab/+caffe/set_random_seed.m
+new file mode 100644
+index 0000000..685e6f3
+--- /dev/null
++++ b/matlab/+caffe/set_random_seed.m
+@@ -0,0 +1,11 @@
++function set_random_seed(random_seed)
++% set_random_seed(random_seed)
++%   set Caffe's random_seed
++
++CHECK(isscalar(random_seed) && random_seed >= 0, ...
++  'random_seed must be non-negative integer');
++random_seed = double(random_seed);
++
++caffe_('set_random_seed', random_seed);
++
++end
+diff --git a/src/caffe/net.cpp b/src/caffe/net.cpp
+index 644cb7e..fe2c847 100644
+--- a/src/caffe/net.cpp
++++ b/src/caffe/net.cpp
+@@ -284,6 +284,16 @@ void Net<Dtype>::Init(const NetParameter& in_param) {
+ }
+ 
+ template <typename Dtype>
++void Net<Dtype>::SetPhase(Phase phase){
++	// set all layers 
++	for (int i = 0; i < layers_.size(); ++i){
++		layers_[i]->set_phase(phase);
++	}
++	// set net phase
++	phase_ = phase;
++}
++
++template <typename Dtype>
+ void Net<Dtype>::FilterNet(const NetParameter& param,
+     NetParameter* param_filtered) {
+   NetState net_state(param.state());
+-- 
+2.7.4
+

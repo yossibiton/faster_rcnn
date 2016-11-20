@@ -173,8 +173,16 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
             conf.ims_per_batch, conf.batch_size);
         [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
             fast_rcnn_get_minibatch(conf, image_roidb_train(sub_db_inds));
-
+    
         net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
+        if (length(caffe_solver.net.inputs) == 6)
+            % should supply bbox_loss_weights_outside also (newer code of
+            % smooth_L1_loss implementation)
+            % we just set 1 for all out weights to get the same behaviour
+            % as the older (original) code
+            net_inputs{end+1} = ones(size(bbox_loss_weights_blob));
+        end
+        
         caffe_solver.net.reshape_as_input(net_inputs);
 
         % one iter SGD update
@@ -247,7 +255,10 @@ function check_gpu_memory(conf, caffe_solver, num_classes, do_val)
     bbox_loss_weights_blob = bbox_targets_blob;
     
     net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
-    
+    if (length(caffe_solver.net.inputs) == 6)
+        % should supply bbox_loss_weights_outside
+        net_inputs{end+1} = bbox_loss_weights_blob;
+    end
     % Reshape net's input blobs
     caffe_solver.net.reshape_as_input(net_inputs);
 

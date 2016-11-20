@@ -31,25 +31,30 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
                 image_indices2, class_image_indices(image_indices2));
             n_images_class = length(image_indices2{1});
             
-            % 1.2 - changing samples distribution according to their weights
-            %       (replication for pos/neg seperately without changing their ratio)
-            image_indices3 = cell(1, 2);
-            for i_class = 1:length(image_indices2)
-                image_indices_class = image_indices2{i_class};
-                image_indices_class_new = [];
-                weights_class = [image_roidb(image_indices_class).weight];
-                % assuming weight are positive integers out of limited set
-                % of values (1:N)
-                [W, ~, iw] = unique(weights_class);
-                for i_weight = 1:length(W)
-                    weight_value = W(i_weight);
-                    indices_rep = repmat(image_indices_class(iw == i_weight), [1 weight_value]);
-                    image_indices_class_new = [image_indices_class_new; indices_rep(:)];
+            if false
+                % disabling this part
+                % 1.2 - changing samples distribution according to their weights
+                %       (replication for pos/neg seperately without changing their ratio)
+                image_indices3 = cell(1, 2);
+                for i_class = 1:length(image_indices2)
+                    image_indices_class = image_indices2{i_class};
+                    image_indices_class_new = [];
+                    weights_class = [image_roidb(image_indices_class).weight];
+                    % assuming weight are positive integers out of limited set
+                    % of values (1:N)
+                    [W, ~, iw] = unique(weights_class);
+                    for i_weight = 1:length(W)
+                        weight_value = W(i_weight);
+                        indices_rep = repmat(image_indices_class(iw == i_weight), [1 weight_value]);
+                        image_indices_class_new = [image_indices_class_new; indices_rep(:)];
+                    end
+                    % we want to save original numer of samples in batch
+                    image_indices_class_new = image_indices_class_new(...
+                        randperm(length(image_indices_class_new), n_images_class));
+                    image_indices3{i_class} = image_indices_class_new;
                 end
-                % we want to save original numer of samples in batch
-                image_indices_class_new = image_indices_class_new(...
-                    randperm(length(image_indices_class_new), n_images_class));
-                image_indices3{i_class} = image_indices_class_new;
+            else
+                image_indices3 = image_indices2;
             end
             
             % pack into minibatches, where each has half positives half
