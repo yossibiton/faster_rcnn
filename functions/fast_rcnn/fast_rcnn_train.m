@@ -204,6 +204,10 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
 
                     % Reshape net's input blobs
                     net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
+                    if (length(caffe_solver.net.inputs) == 6)
+                        net_inputs{end+1} = ones(size(bbox_loss_weights_blob));
+                    end
+        
                     caffe_solver.net.reshape_as_input(net_inputs);
                     
                     caffe_solver.net.forward(net_inputs);
