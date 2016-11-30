@@ -221,7 +221,13 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
                 end
             end
             
-            perf_temp = show_state(iter_, train_results, val_results);
+            try
+                perf_temp = show_state(iter_, train_results, val_results);
+            catch me
+                warning('error in show_state');
+                disp(me.message);
+                perf_temp = struct;
+            end
             perf_temp.iter = iter_;
             perf{end+1} = perf_temp;
             save(perf_path, 'perf');
@@ -329,12 +335,12 @@ end
 function perf = show_state(iter, train_results, val_results)
     perf = struct;
     perf.train = struct;
-    perf.train.error_cls = 1 - mean(train_results.accuarcy.data);
+    perf.train.error_cls = 1 - mean(train_results.accuracy.data);
     perf.train.loss_cls = mean(train_results.loss_cls.data);
     perf.train.loss_reg = mean(train_results.loss_bbox.data);
     
     perf.test = struct;
-    perf.test.error_cls = 1 - mean(val_results.accuarcy.data);
+    perf.test.error_cls = 1 - mean(val_results.accuracy.data);
     perf.test.loss_cls = mean(val_results.loss_cls.data);
     perf.test.loss_reg = mean(val_results.loss_bbox.data);
     
