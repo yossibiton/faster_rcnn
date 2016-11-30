@@ -24,6 +24,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     ip.addParameter('net_file',          fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'),       @isstr);
     ip.addParameter('cache_name',        'Zeiler_conv5', @isstr);
     ip.addParameter('shouldContinue',    false,          @isscalar);
+    ip.addParameter('prefetch',          false,          @isscalar);
     
     ip.parse(conf, imdb_train, roidb_train, varargin{:});
     opts = ip.Results;
@@ -165,6 +166,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     val_results = [];  
     iter_ = caffe_solver.iter();
     max_iter = caffe_solver.max_iter();
+    
     while (iter_ < max_iter)
         caffe_solver.net.set_phase('train');
 
@@ -172,8 +174,16 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         [shuffled_inds, sub_db_inds] = generate_random_minibatch(shuffled_inds, image_roidb_train, ...
             conf.ims_per_batch, conf.batch_size);
         [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
-            fast_rcnn_get_minibatch(conf, image_roidb_train(sub_db_inds));
-    
+            fast_rcnn_get_minibatch(conf, image_roidb_train(sub_db_inds), opts.prefetch);
+        
+        if opts.prefetch
+            % prefetch next batch
+            prefetch_args = {'SubtractAverage', conf.image_means(1)};
+            sub_inds_next = shuffled_inds{1};
+            vl_imreadjpeg(image_roidb_train(sub_inds_next).image_path, ...
+                prefetch_args{:});
+        end
+        
         net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
         if (length(caffe_solver.net.inputs) == 6)
             % should supply bbox_loss_weights_outside also (newer code of

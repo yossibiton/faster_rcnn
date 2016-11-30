@@ -1,4 +1,4 @@
-function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = fast_rcnn_get_minibatch(conf, image_roidb)
+function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = fast_rcnn_get_minibatch(conf, image_roidb, prefetch)
 % [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] ...
 %    = fast_rcnn_get_minibatch(conf, image_roidb)
 % --------------------------------------------------------
@@ -27,7 +27,11 @@ function [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = 
     fg_rois_per_image = round(rois_per_image * conf.fg_fraction);
     
     % Get the input image blob
-    [im_blob, im_scales] = get_image_blob(conf, image_roidb, batch_scales);
+    if prefetch
+        [im_blob, im_scales] = get_image_blob_prefetch(conf, image_roidb, batch_scales);
+    else
+        [im_blob, im_scales] = get_image_blob(conf, image_roidb, batch_scales);
+    end
     
     % build the region of interest and label blobs
     rois_blob = zeros(0, 5, 'single');
@@ -96,6 +100,39 @@ function [im_blob, im_scales] = get_image_blob(conf, images, target_sizes)
     im_blob = im_list_to_blob(processed_ims);
 end
 
+function [im_blob, im_scales] = get_image_blob_prefetch(conf, images, target_sizes)
+    
+    num_images = length(images);
+    
+    % In this function we don't do scaling at all
+    % TODO : add subtract mean (currently assume grayscale)
+    prefetch_args = {'SubtractAverage', conf.image_means(1)};
+    processed_ims = vl_imreadjpeg(...
+        image_roidb_train(sub_inds_next).image_path, prefetch_args{:});
+    im_scales = ones(num_images, 1);
+    
+    if false
+    for i = 1:num_images
+        if isempty(images(i).image)
+            im = imread(images(i).image_path);
+        else
+            im = images(i).image;
+        end
+        
+        if ndims(im) == 2 && ndims(conf.image_means) == 3
+            % replicate from grayscale to "rgb"
+            im = cat(3, im, im, im);
+        end
+        
+        [im, im_scale] = prep_im_for_blob(im, conf.image_means, target_sizes(i), conf.max_size);
+        
+        im_scales(i) = im_scale;
+        processed_ims{i} = im; 
+    end
+    end
+    
+    im_blob = im_list_to_blob(processed_ims);
+end
 %% Generate a random sample of ROIs comprising foreground and background examples.
 function [labels, overlaps, rois, bbox_targets, bbox_loss_weights] = ...
     sample_rois(conf, image_roidb, fg_rois_per_image, rois_per_image)
