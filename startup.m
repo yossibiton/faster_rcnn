@@ -19,7 +19,7 @@ function startup()
 
     caffe_path = fullfile(curdir, '..', 'caffe_Austriker', 'matlab');
     if exist(caffe_path, 'dir') == 0
-        error('matcaffe is missing from external/caffe/matlab; See README.md');
+        error('matcaffe is missing from %s', caffe_path);
     end
     addpath(genpath(caffe_path));
 

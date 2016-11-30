@@ -196,6 +196,10 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         %                   once full epoch is done
         if ~mod(iter_, opts.val_interval) || isempty(shuffled_inds)
             if opts.do_val
+                % PAY ATTENTION : this call doesn't really switch to full
+                % test mode. Some layers, such as batch_norm, define
+                % internal parameters according to train/test mode during
+                % setup only (such as use_global_stats parameter)
                 caffe_solver.net.set_phase('test');                
                 for i = 1:size(shuffled_inds_val, 2)
                     sub_db_inds = shuffled_inds_val{i};
