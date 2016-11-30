@@ -20,7 +20,8 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     ip.addParameter('val_interval',      2000,           @isscalar); 
     ip.addParameter('snapshot_interval', 10000,          @isscalar);
     ip.addParameter('solver_def_file',   fullfile(pwd, 'models', 'Zeiler_conv5', 'solver.prototxt'),    @isstr);
-    ip.addParameter('net_def_file',      fullfile(pwd, 'models', 'Zeiler_conv5', 'train_val.prototxt'), @isstr);                                                    
+    ip.addParameter('net_def_file',      fullfile(pwd, 'models', 'Zeiler_conv5', 'train_val.prototxt'), @isstr);
+    ip.addParameter('test_net_def_file', fullfile(pwd, 'models', 'Zeiler_conv5', 'deploy.prototxt'), @isstr);
     ip.addParameter('net_file',          fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'),       @isstr);
     ip.addParameter('cache_name',        'Zeiler_conv5', @isstr);
     ip.addParameter('shouldContinue',    false,          @isscalar);
@@ -134,6 +135,17 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     fprintf('Done.\n');
     
     if opts.do_val
+        if exist(opts.test_net_def_file, 'file')
+            %caffe_net_test = caffe.Net(opts.test_net_def_file, 'test');
+            % we prefer to use the trainval file as it contains
+            % loss & accuracy layers
+            caffe_net_test = caffe.Net(opts.net_def_file, 'test');
+            one_train_test_net = false;
+        else
+            one_train_test_net = true;
+            caffe_net_test = caffe_solver.net;
+        end
+        
         fprintf('Preparing validation data...');
         if exist(db_val_path, 'file')
             load(db_val_path, 'image_roidb_val');
@@ -144,7 +156,18 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         end
         fprintf('Done.\n');
 
-        % fix validation data
+        % PAY ATTENTION : in the this train/test function the order of the
+        %   test set examples affects dramitacilly test performance.
+        %   This is'nt clear exactly why but anyway the test phase in this
+        %   function is wrong, since the batch_norm layer acts as in train mode
+        if false
+            % fix validation data (use original images order instead of random)
+            num_images_val = length(image_roidb_val);
+            num_images_trunc = conf.ims_per_batch * floor((num_images_val / conf.ims_per_batch));
+            tmp = reshape((1:num_images_trunc)', 128, []);
+            shuffled_inds_val = mat2cell(tmp, 128, ones(1, size(tmp, 2)));
+        end
+        
         shuffled_inds_val = generate_random_minibatch([], image_roidb_val, conf.ims_per_batch, conf.batch_size);
         shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), min(opts.val_iters, length(shuffled_inds_val))));
     end
@@ -174,14 +197,13 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
             fast_rcnn_get_minibatch(conf, image_roidb_train(sub_db_inds));
     
-        net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
-        if (length(caffe_solver.net.inputs) == 6)
-            % should supply bbox_loss_weights_outside also (newer code of
-            % smooth_L1_loss implementation)
-            % we just set 1 for all out weights to get the same behaviour
-            % as the older (original) code
-            net_inputs{end+1} = ones(size(bbox_loss_weights_blob));
-        end
+        % should supply bbox_loss_weights_outside also (newer code of
+        % smooth_L1_loss implementation)
+        % we just set 1 for all out weights to get the same behaviour
+        % as the older (original) code
+        net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, ...
+            bbox_loss_weights_blob, ones(size(bbox_loss_weights_blob))};
+        net_inputs = net_inputs([1:length(caffe_solver.net.inputs)]);
         
         caffe_solver.net.reshape_as_input(net_inputs);
 
@@ -200,23 +222,26 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
                 % test mode. Some layers, such as batch_norm, define
                 % internal parameters according to train/test mode during
                 % setup only (such as use_global_stats parameter)
-                caffe_solver.net.set_phase('test');                
+                caffe_net_test.set_phase('test');
+                if ~one_train_test_net
+                    % copy updated weights from trained network
+                    copy_weights(caffe_solver.net, caffe_net_test);
+                end
                 for i = 1:size(shuffled_inds_val, 2)
                     sub_db_inds = shuffled_inds_val{i};
                     [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
                         fast_rcnn_get_minibatch(conf, image_roidb_val(sub_db_inds));
 
+                    net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, ...
+                        bbox_loss_weights_blob, ones(size(bbox_loss_weights_blob))};
+                    net_inputs = net_inputs([1:length(caffe_net_test.inputs)]);
+                    
                     % Reshape net's input blobs
-                    net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
-                    if (length(caffe_solver.net.inputs) == 6)
-                        net_inputs{end+1} = ones(size(bbox_loss_weights_blob));
-                    end
-        
-                    caffe_solver.net.reshape_as_input(net_inputs);
+                    caffe_net_test.reshape_as_input(net_inputs);
                     
-                    caffe_solver.net.forward(net_inputs);
+                    caffe_net_test.forward(net_inputs);
                     
-                    rst = caffe_solver.net.get_output();
+                    rst = caffe_net_test.get_output();
                     val_results = parse_rst(val_results, rst);
                 end
             end
@@ -422,5 +447,20 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
         sub_inds = shuffled_inds{1};
         % assert(length(sub_inds) == ims_per_batch);
         shuffled_inds(1) = [];
+    end
+end
+
+function copy_weights(net_source, net_dest)
+    layers_source = net_source.layer_names;
+    layers_dest = net_dest.layer_names;
+    for i_layer = 1:length(layers_source)
+        layer_name = layers_source{i_layer};
+        if ismember(layer_name, layers_dest) && isprop(net_source.layers(layer_name), 'params')
+            num_params = length(net_source.layers(layer_name).params);
+            for i_param = 1:num_params
+                net_dest.layers(layer_name).params(i_param).set_data(...
+                    net_source.layers(layer_name).params(i_param).get_data());
+            end
+        end
     end
 end
