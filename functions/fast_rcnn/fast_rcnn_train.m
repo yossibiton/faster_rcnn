@@ -25,10 +25,15 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     ip.addParameter('net_file',          fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'),       @isstr);
     ip.addParameter('cache_name',        'Zeiler_conv5', @isstr);
     ip.addParameter('shouldContinue',    false,          @isscalar);
+    ip.addParameter('prefetch',          false,          @isscalar);
+    ip.addParameter('datatset_in_memory',false,          @isscalar);
     
     ip.parse(conf, imdb_train, roidb_train, varargin{:});
     opts = ip.Results;
     
+    if opts.datatset_in_memory
+        opts.prefetch = false;
+    end
 %% try to find trained model
     perf = {};
     
@@ -56,9 +61,6 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     caffe_log_file_base = fullfile(cache_dir, 'caffe_log');
     caffe.init_log(caffe_log_file_base);
     caffe_solver = caffe.Solver(opts.solver_def_file);
-    
-    % we don't care about 'net' field in solver file
-    % caffe_solver.net = caffe.Net(opts.net_def_file, 'train');
     
     if opts.shouldContinue && exist(save_model_path, 'file')
         % initalize from last saved model       
@@ -98,6 +100,9 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     % first copy solver & network file to output dir
     copyfile(opts.net_def_file, fullfile(cache_dir, 'train_val.prototxt'));
     copyfile(opts.solver_def_file, fullfile(cache_dir, 'solver.prototxt'));
+    if exist(opts.test_net_def_file, 'file')
+        copyfile(opts.test_net_def_file, fullfile(cache_dir, 'deploy.prototxt'));
+    end
     mean_image = conf.image_means;
     save(fullfile(cache_dir, 'mean_value.mat'), 'mean_image');
     
@@ -134,16 +139,29 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     end
     fprintf('Done.\n');
     
+    image_roidb_train_loaded = [];
+    if opts.datatset_in_memory
+        fprintf('Loading dataset into memory...');
+        image_roidb_train_loaded = load_dataset_imgs(conf, image_roidb_train, ...
+            [db_train_path(1:end-4) '_imgs.mat']);
+        fprintf('Done.\n');
+    end
+    
     if opts.do_val
-        if exist(opts.test_net_def_file, 'file')
-            %caffe_net_test = caffe.Net(opts.test_net_def_file, 'test');
-            % we prefer to use the trainval file as it contains
-            % loss & accuracy layers
-            caffe_net_test = caffe.Net(opts.net_def_file, 'test');
-            one_train_test_net = false;
+        if false
+            if exist(opts.test_net_def_file, 'file')
+                %caffe_net_test = caffe.Net(opts.test_net_def_file, 'test');
+                % we prefer to use the trainval file as it contains
+                % loss & accuracy layers
+                caffe_net_test = caffe.Net(opts.net_def_file, 'test');
+                one_train_test_net = false;
+            else
+                one_train_test_net = true;
+                caffe_net_test = caffe_solver.net;
+            end
         else
-            one_train_test_net = true;
-            caffe_net_test = caffe_solver.net;
+            caffe_net_test = caffe.Net(opts.net_def_file, 'test');
+            caffe_net_test.share_weights_with(caffe_solver.net);
         end
         
         fprintf('Preparing validation data...');
@@ -156,20 +174,28 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         end
         fprintf('Done.\n');
 
+        image_roidb_val_loaded = [];
+        if opts.datatset_in_memory
+            fprintf('Loading dataset into memory...');
+            image_roidb_val_loaded = load_dataset_imgs(conf, image_roidb_val, ...
+                [db_val_path(1:end-4) '_imgs.mat']);
+            fprintf('Done.\n');
+        end
+       
         % PAY ATTENTION : in the this train/test function the order of the
         %   test set examples affects dramitacilly test performance.
         %   This is'nt clear exactly why but anyway the test phase in this
         %   function is wrong, since the batch_norm layer acts as in train mode
-        if false
+        if true
             % fix validation data (use original images order instead of random)
             num_images_val = length(image_roidb_val);
             num_images_trunc = conf.ims_per_batch * floor((num_images_val / conf.ims_per_batch));
             tmp = reshape((1:num_images_trunc)', 128, []);
             shuffled_inds_val = mat2cell(tmp, 128, ones(1, size(tmp, 2)));
+        else
+            shuffled_inds_val = generate_random_minibatch([], image_roidb_val, conf.ims_per_batch, conf.batch_size);
+            shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), min(opts.val_iters, length(shuffled_inds_val))));
         end
-        
-        shuffled_inds_val = generate_random_minibatch([], image_roidb_val, conf.ims_per_batch, conf.batch_size);
-        shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), min(opts.val_iters, length(shuffled_inds_val))));
     end
 %% update scale values
     if conf.keep_scale
@@ -188,23 +214,25 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     val_results = [];  
     iter_ = caffe_solver.iter();
     max_iter = caffe_solver.max_iter();
+    
     while (iter_ < max_iter)
         caffe_solver.net.set_phase('train');
 
         % generate minibatch training data
         [shuffled_inds, sub_db_inds] = generate_random_minibatch(shuffled_inds, image_roidb_train, ...
             conf.ims_per_batch, conf.batch_size);
-        [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
-            fast_rcnn_get_minibatch(conf, image_roidb_train(sub_db_inds));
-    
-        % should supply bbox_loss_weights_outside also (newer code of
-        % smooth_L1_loss implementation)
-        % we just set 1 for all out weights to get the same behaviour
-        % as the older (original) code
-        net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, ...
-            bbox_loss_weights_blob, ones(size(bbox_loss_weights_blob))};
-        net_inputs = net_inputs([1:length(caffe_solver.net.inputs)]);
+        net_inputs = get_nn_inputs(conf, image_roidb_train, image_roidb_train_loaded, sub_db_inds, opts);
+        net_inputs = net_inputs(1:length(caffe_solver.net.inputs));
         
+        % prefetch next blob
+%         if opts.prefetch
+%             % prefetch next batch
+%             prefetch_args = {'SubtractAverage', conf.image_means(1)};
+%             sub_inds_next = shuffled_inds{1};
+%             vl_imreadjpeg(image_roidb_train(sub_inds_next).image_path, ...
+%                 prefetch_args{:});
+%         end
+    
         caffe_solver.net.reshape_as_input(net_inputs);
 
         % one iter SGD update
@@ -223,18 +251,15 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
                 % internal parameters according to train/test mode during
                 % setup only (such as use_global_stats parameter)
                 caffe_net_test.set_phase('test');
-                if ~one_train_test_net
+                %if ~one_train_test_net
                     % copy updated weights from trained network
-                    copy_weights(caffe_solver.net, caffe_net_test);
-                end
+                    %copy_weights(caffe_solver.net, caffe_net_test);
+                %end
                 for i = 1:size(shuffled_inds_val, 2)
                     sub_db_inds = shuffled_inds_val{i};
-                    [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
-                        fast_rcnn_get_minibatch(conf, image_roidb_val(sub_db_inds));
-
-                    net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, ...
-                        bbox_loss_weights_blob, ones(size(bbox_loss_weights_blob))};
-                    net_inputs = net_inputs([1:length(caffe_net_test.inputs)]);
+                    
+                    net_inputs = get_nn_inputs(conf, image_roidb_val, image_roidb_val_loaded, sub_db_inds, opts);
+                    net_inputs = net_inputs(1:length(caffe_net_test.inputs));
                     
                     % Reshape net's input blobs
                     caffe_net_test.reshape_as_input(net_inputs);
@@ -277,6 +302,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     diary off;
     caffe.reset_all(); 
     rng(prev_rng);
+   
 end
 
 function check_gpu_memory(conf, caffe_solver, num_classes, do_val)
@@ -463,4 +489,65 @@ function copy_weights(net_source, net_dest)
             end
         end
     end
+end
+
+function image_roidb_loaded = load_dataset_imgs(conf, image_roidb, cache_path)
+
+    if exist(cache_path, 'file')
+        image_roidb_loaded = load(cache_path);
+    else
+        batch_size = conf.batch_size;
+        n_batches = ceil(length(image_roidb) / batch_size);
+        im_blob = cell(n_batches, 1);
+        im_scales = cell(n_batches, 1);
+        parfor i_batch = 1:n_batches
+            batch_start = 1 + (i_batch - 1)*batch_size;
+            batch_end = min(length(image_roidb), ...
+                batch_start + batch_size - 1);
+            batch_indices = batch_start:batch_end;
+            batch_size_actual = length(batch_indices);
+            if (batch_size_actual < batch_size)
+                batch_indices_full = ...
+                    [batch_indices, 1:(batch_size - batch_size_actual)];
+            else
+                batch_indices_full = batch_indices; 
+            end
+
+            [im_blob_batch, im_scales_batch] = ...
+                fast_rcnn_get_minibatch(conf, image_roidb(batch_indices_full));
+            im_blob_batch = squeeze(mat2cell(im_blob_batch, ...
+                size(im_blob_batch, 1), size(im_blob_batch, 2), ...
+                size(im_blob_batch, 3), ones(1, conf.batch_size)));
+
+            im_blob{i_batch} = im_blob_batch(1:batch_size_actual);
+            im_scales{i_batch} = im_scales_batch(1:batch_size_actual);
+        end
+        im_blob = cat(1, im_blob{:});
+        im_scales = cat(1, im_scales{:});
+        save(cache_path, 'im_blob', 'im_scales');
+        
+        % trasnforming into struct
+        image_roidb_loaded = struct;
+        image_roidb_loaded.im_blob = im_blob;
+        image_roidb_loaded.im_scales = im_scales;
+        clear im_blob im_scales
+    end
+end
+
+function net_inputs = get_nn_inputs(conf, image_roidb, image_roidb_loaded, sub_db_inds, opts)
+    if opts.datatset_in_memory
+        im_blob = image_roidb_loaded.im_blob(sub_db_inds);
+        % reshape to W x H x D x batch_size
+        im_blob = cell2mat(reshape(im_blob, [1 1 1 length(im_blob)]));
+
+        im_scales = image_roidb_loaded.im_scales(sub_db_inds);
+        [im_blob, ~, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
+            fast_rcnn_get_minibatch(conf, image_roidb(sub_db_inds), opts.prefetch, ...
+            im_blob, im_scales);
+    else
+        [im_blob, ~, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
+            fast_rcnn_get_minibatch(conf, image_roidb(sub_db_inds), opts.prefetch);
+    end
+    net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, ...
+        bbox_loss_weights_blob, ones(size(bbox_loss_weights_blob))};
 end

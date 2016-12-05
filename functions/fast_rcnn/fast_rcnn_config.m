@@ -52,6 +52,9 @@ function conf = fast_rcnn_config(varargin)
     ip.addParameter('test_nms',        0.3,            @isscalar);
     ip.addParameter('test_binary',     false,          @islogical);
     
+    %% general
+    ip.addParameter('im_gpu',          false,          @islogical); % convert images to gpu arrays (not in use)
+    
     ip.parse(varargin{:});
     conf = ip.Results;
     

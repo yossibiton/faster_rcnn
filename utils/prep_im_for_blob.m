@@ -1,7 +1,7 @@
-function [im, im_scale] = prep_im_for_blob(im, im_means, target_size, max_size)
+function [im, im_scale] = prep_im_for_blob(im, im_means, target_size, max_size, im_gpu)
     im = single(im);
     
-    if ~isa(im, 'gpuArray')
+    if ~im_gpu
         try
             im = bsxfun(@minus, im, im_means);
         catch
@@ -10,8 +10,10 @@ function [im, im_scale] = prep_im_for_blob(im, im_means, target_size, max_size)
         end
         im_scale = prep_im_for_blob_size(size(im), target_size, max_size);
 
-        target_size = round([size(im, 1), size(im, 2)] * im_scale);
-        im = imresize(im, target_size, 'bilinear', 'antialiasing', false);
+        if (im_scale ~= 1)
+            target_size = round([size(im, 1), size(im, 2)] * im_scale);
+            im = imresize(im, target_size, 'bilinear', 'antialiasing', false);
+        end
     else
         % for im as gpuArray
         try
@@ -26,6 +28,8 @@ function [im, im_scale] = prep_im_for_blob(im, im_means, target_size, max_size)
         end
         
         im_scale = prep_im_for_blob_size(size(im), target_size, max_size);
-        im = imresize(im, im_scale);
+        if (im_scale ~= 1)
+            im = imresize(im, im_scale);
+        end
     end
 end
