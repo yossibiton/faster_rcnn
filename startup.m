@@ -17,7 +17,8 @@ function startup()
 
     %mkdir_if_missing(fullfile(curdir, 'external'));
 
-    caffe_path = fullfile(curdir, '..', 'caffe_Austriker', 'matlab');
+    %caffe_path = fullfile(curdir, '..', 'caffe_Austriker', 'matlab');
+    caffe_path = fullfile(curdir, '..', 'caffe_ristretto_Austriker', 'matlab');
     if exist(caffe_path, 'dir') == 0
         error('matcaffe is missing from %s', caffe_path);
     end

@@ -23,6 +23,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     ip.addParameter('net_def_file',      fullfile(pwd, 'models', 'Zeiler_conv5', 'train_val.prototxt'), @isstr);
     ip.addParameter('test_net_def_file', fullfile(pwd, 'models', 'Zeiler_conv5', 'deploy.prototxt'), @isstr);
     ip.addParameter('net_file',          fullfile(pwd, 'models', 'Zeiler_conv5', 'Zeiler_conv5'),       @isstr);
+    ip.addParameter('weights_file_name', 'final',        @isstr);
     ip.addParameter('cache_name',        'Zeiler_conv5', @isstr);
     ip.addParameter('shouldContinue',    false,          @isscalar);
     ip.addParameter('prefetch',          false,          @isscalar);
@@ -45,7 +46,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     db_train_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name '.mat']);
     db_val_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name_val '.mat']);
     
-    save_model_path = fullfile(cache_dir, 'final');
+    save_model_path = fullfile(cache_dir, opts.weights_file_name);
     perf_path = fullfile(cache_dir, 'perf.mat');
     if exist(save_model_path, 'file') && ~opts.shouldContinue
         if exist(perf_path, 'file')
@@ -70,7 +71,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         % model files
         saved_models_names = dir(fullfile(cache_dir, 'iter_*'));
         saved_models_names = {saved_models_names.name};
-        saved_models_names{end+1} = 'final';
+        saved_models_names{end+1} = opts.weights_file_name;
         for i_file = 1:length(saved_models_names)
             modified_name = sprintf('%02d_%s', ...
                 stage_num - 1, saved_models_names{i_file});
@@ -297,7 +298,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     
     % final snapshot
     snapshot(caffe_solver, bbox_means, bbox_stds, cache_dir, sprintf('iter_%d', iter_));
-    save_model_path = snapshot(caffe_solver, bbox_means, bbox_stds, cache_dir, 'final');
+    save_model_path = snapshot(caffe_solver, bbox_means, bbox_stds, cache_dir, opts.weights_file_name);
 
     diary off;
     caffe.reset_all(); 
@@ -404,78 +405,6 @@ function perf = show_state(iter, train_results, val_results)
     end
 end
 
-function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, image_roidb, ims_per_batch, batch_size)
-
-    % shuffle training data per batch
-    if isempty(shuffled_inds)
-        % make sure each minibatch, only has horizontal images or vertical
-        % images, to save gpu memory
-        
-        shuffled_inds = [];
-        hori_image_inds = arrayfun(@(x) x.im_size(2) >= x.im_size(1), image_roidb, 'UniformOutput', true);
-        hori_image_inds = hori_image_inds(:);
-        image_indices = {find(hori_image_inds), find(~hori_image_inds)};
-        % looking for images with at least one roi of any class
-        % in each batch we will choose at least half such images
-        pos_image_indices = arrayfun(@(x) nnz(x.class) > 0, image_roidb);
-        pos_image_indices = pos_image_indices(:);
-        
-        % number of samples per image
-        num_samples = arrayfun(@(x) sum(x.class == 0), image_roidb);
-
-        % seperate generation for horizontal/vertical
-        for k = 1:2
-            image_indices_ = image_indices{k}(:);
-            if isempty(image_indices_)
-                continue;
-            end
-            
-            % keep balanced batches
-            image_indices_pos = find(pos_image_indices(image_indices_));
-            pos_frac = length(image_indices_pos) / length(image_indices_);
-            if (pos_frac < 0.5)
-                % replicate "positive" images in order to have balanced sampling
-                rep_factor = 1 / pos_frac - 2;
-                add_pos = round(rep_factor * sum(pos_image_indices(image_indices_)));
-                
-                image_indices_pos_rep = repmat(image_indices_pos, ceil(rep_factor), 1);
-                image_indices_ = [image_indices_; ...
-                    image_indices_pos_rep(randperm(length(image_indices_pos_rep), add_pos))];
-            else
-                % replicate "negative" images in order to have balanced sampling
-            end
-            
-            % split to groups by num_samples
-            [C, ~, ic] = unique(num_samples(image_indices_));
-            for i_group = 1:length(C)
-                image_indices__ = image_indices_(ic == i_group);
-                ims_per_batch_ = ims_per_batch;
-                if (C(i_group)*ims_per_batch_ < batch_size)
-                    % we don't have enough samples to reach batch_size
-                    ims_per_batch_ = round(batch_size / C(i_group));
-                end
-                
-                % random perm
-                lim = floor(length(image_indices__) / ims_per_batch_) * ims_per_batch_;
-                image_indices__ = image_indices__(randperm(length(image_indices__), lim));
-                % combine sample for each ims_per_batch 
-                image_indices__ = reshape(image_indices__, ims_per_batch_, []);
-                shuffled_inds = [shuffled_inds, num2cell(image_indices__, 1)];
-            end
-            
-            % shuffle batches order
-            shuffled_inds = shuffled_inds(randperm(length(shuffled_inds)));
-        end
-    end
-    
-    if nargout > 1
-        % generate minibatch training data
-        sub_inds = shuffled_inds{1};
-        % assert(length(sub_inds) == ims_per_batch);
-        shuffled_inds(1) = [];
-    end
-end
-
 function copy_weights(net_source, net_dest)
     layers_source = net_source.layer_names;
     layers_dest = net_dest.layer_names;
@@ -495,6 +424,14 @@ function image_roidb_loaded = load_dataset_imgs(conf, image_roidb, cache_path)
 
     if exist(cache_path, 'file')
         image_roidb_loaded = load(cache_path);
+        if conf.image_means(1) ~= image_roidb_loaded.image_mean
+            for i_image = 1:length(image_roidb_loaded.im_blob)
+                image_roidb_loaded.im_blob{i_image} = ...
+                    image_roidb_loaded.im_blob{i_image} + ...
+                image_roidb_loaded.image_mean - ...
+                conf.image_means(1);
+            end
+        end
     else
         batch_size = conf.batch_size;
         n_batches = ceil(length(image_roidb) / batch_size);
@@ -524,12 +461,14 @@ function image_roidb_loaded = load_dataset_imgs(conf, image_roidb, cache_path)
         end
         im_blob = cat(1, im_blob{:});
         im_scales = cat(1, im_scales{:});
-        save(cache_path, 'im_blob', 'im_scales');
+        image_mean = conf.image_means(1);
+        save(cache_path, 'im_blob', 'im_scales', 'image_mean', '-v7.3');
         
         % trasnforming into struct
         image_roidb_loaded = struct;
         image_roidb_loaded.im_blob = im_blob;
         image_roidb_loaded.im_scales = im_scales;
+        
         clear im_blob im_scales
     end
 end
