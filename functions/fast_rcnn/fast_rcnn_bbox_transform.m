@@ -7,6 +7,8 @@ function [regression_label] = fast_rcnn_bbox_transform(ex_boxes, gt_boxes)
 % Licensed under The MIT License [see LICENSE for details]
 % --------------------------------------------------------
 
+    % here width is measured as number of pixels inside bbox
+    % (and not distance between centers of first & last pixels)
     ex_widths = ex_boxes(:, 3) - ex_boxes(:, 1) + 1;
     ex_heights = ex_boxes(:, 4) - ex_boxes(:, 2) + 1;
     ex_ctr_x = ex_boxes(:, 1) + 0.5 * (ex_widths - 1);

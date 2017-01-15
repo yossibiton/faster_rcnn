@@ -28,6 +28,8 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     ip.addParameter('shouldContinue',    false,          @isscalar);
     ip.addParameter('prefetch',          false,          @isscalar);
     ip.addParameter('datatset_in_memory',false,          @isscalar);
+    ip.addParameter('adaptive_opts'     ,[]);
+    ip.addParameter('batch_opts'     ,[]);
     
     ip.parse(conf, imdb_train, roidb_train, varargin{:});
     opts = ip.Results;
@@ -35,6 +37,10 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     if opts.datatset_in_memory
         opts.prefetch = false;
     end
+    if isempty(opts.batch_opts)
+        opts.batch_opts = struct('use_weights', false, 'pos_part', 0.5);
+    end
+    
 %% try to find trained model
     perf = {};
     
@@ -42,9 +48,9 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     imdbs_name_val = cell2mat(cellfun(@(x) x.name, opts.imdb_val, 'UniformOutput', false));
     
     cache_dir = fullfile(pwd, 'output', 'fast_rcnn_cachedir', opts.cache_name, imdbs_name);
-    cache_dir_imdb = fullfile(pwd, 'imdb', 'cache');
-    db_train_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name '.mat']);
-    db_val_path = fullfile(cache_dir_imdb, ['imroidb_' imdbs_name_val '.mat']);
+    global imdb_cache_dir;
+    db_train_path = fullfile(imdb_cache_dir, ['imroidb_' imdbs_name '.mat']);
+    db_val_path = fullfile(imdb_cache_dir, ['imroidb_' imdbs_name_val '.mat']);
     
     save_model_path = fullfile(cache_dir, opts.weights_file_name);
     perf_path = fullfile(cache_dir, 'perf.mat');
@@ -106,6 +112,10 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     end
     mean_image = conf.image_means;
     save(fullfile(cache_dir, 'mean_value.mat'), 'mean_image');
+    if ~isempty(opts.adaptive_opts)
+        adaptive_opts = opts.adaptive_opts;
+        save(fullfile(cache_dir, 'adaptive_opts.mat'), 'adaptive_opts');
+    end
     
     % init log
     timestamp = datestr(datevec(now()), 'yyyymmdd_HHMMSS');
@@ -208,20 +218,32 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
 %%  try to train/val with images which have maximum size potentially, to validate whether the gpu memory is enough  
     num_classes = size(image_roidb_train(1).overlap, 2);
     check_gpu_memory(conf, caffe_solver, num_classes, opts.do_val);
-    
 %% training
     shuffled_inds = [];
     train_results = [];  
     val_results = [];  
     iter_ = caffe_solver.iter();
     max_iter = caffe_solver.max_iter();
-    
     while (iter_ < max_iter)
         caffe_solver.net.set_phase('train');
 
+        if ~isempty(opts.adaptive_opts)
+            %[image_roidb_train, use_weights] = adaptive_training_op(image_roidb_train, iter_ / max_iter, opts.adaptive_opts);
+            num_imgs_before = length(image_roidb_train);
+            [opts.adaptive_opts, image_roidb_train, use_weights, image_roidb_train_loaded] = ...
+                adaptive_training_op(iter_ / max_iter, opts.adaptive_opts, ...
+                image_roidb_train, image_roidb_train_loaded);
+            opts.batch_opts.use_weights = use_weights;
+            num_imgs_after = length(image_roidb_train);
+            if (num_imgs_after < num_imgs_before)
+                % we should rerandomize minibatches
+                shuffled_inds = [];
+            end
+        end
+        
         % generate minibatch training data
         [shuffled_inds, sub_db_inds] = generate_random_minibatch(shuffled_inds, image_roidb_train, ...
-            conf.ims_per_batch, conf.batch_size);
+            conf.ims_per_batch, conf.batch_size, opts.batch_opts);
         net_inputs = get_nn_inputs(conf, image_roidb_train, image_roidb_train_loaded, sub_db_inds, opts);
         net_inputs = net_inputs(1:length(caffe_solver.net.inputs));
         
@@ -243,6 +265,15 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         rst = caffe_solver.net.get_output();
         train_results = parse_rst(train_results, rst);
             
+        % update scores in image_roidb_train
+        scores = caffe_solver.net.blobs('cls_score').get_data();
+        scores = num2cell(scores(2, :) - scores(1, :));
+        [image_roidb_train(sub_db_inds).score] = scores{:};
+        if isempty(shuffled_inds)
+            % end of epoch
+            % TODO (adaptive training): do we want to rearrange train samples
+        end
+        
         % do valdiation per val_interval iterations or 
         %                   once full epoch is done
         if ~mod(iter_, opts.val_interval) || isempty(shuffled_inds)
@@ -403,90 +434,4 @@ function perf = show_state(iter, train_results, val_results)
         fprintf('Testing  : error %.3g, loss (cls %.3g, reg %.3g)\n', ...
             perf.test.error_cls, perf.test.loss_cls, perf.test.loss_reg);
     end
-end
-
-function copy_weights(net_source, net_dest)
-    layers_source = net_source.layer_names;
-    layers_dest = net_dest.layer_names;
-    for i_layer = 1:length(layers_source)
-        layer_name = layers_source{i_layer};
-        if ismember(layer_name, layers_dest) && isprop(net_source.layers(layer_name), 'params')
-            num_params = length(net_source.layers(layer_name).params);
-            for i_param = 1:num_params
-                net_dest.layers(layer_name).params(i_param).set_data(...
-                    net_source.layers(layer_name).params(i_param).get_data());
-            end
-        end
-    end
-end
-
-function image_roidb_loaded = load_dataset_imgs(conf, image_roidb, cache_path)
-
-    if exist(cache_path, 'file')
-        image_roidb_loaded = load(cache_path);
-        if conf.image_means(1) ~= image_roidb_loaded.image_mean
-            for i_image = 1:length(image_roidb_loaded.im_blob)
-                image_roidb_loaded.im_blob{i_image} = ...
-                    image_roidb_loaded.im_blob{i_image} + ...
-                image_roidb_loaded.image_mean - ...
-                conf.image_means(1);
-            end
-        end
-    else
-        batch_size = conf.batch_size;
-        n_batches = ceil(length(image_roidb) / batch_size);
-        im_blob = cell(n_batches, 1);
-        im_scales = cell(n_batches, 1);
-        parfor i_batch = 1:n_batches
-            batch_start = 1 + (i_batch - 1)*batch_size;
-            batch_end = min(length(image_roidb), ...
-                batch_start + batch_size - 1);
-            batch_indices = batch_start:batch_end;
-            batch_size_actual = length(batch_indices);
-            if (batch_size_actual < batch_size)
-                batch_indices_full = ...
-                    [batch_indices, 1:(batch_size - batch_size_actual)];
-            else
-                batch_indices_full = batch_indices; 
-            end
-
-            [im_blob_batch, im_scales_batch] = ...
-                fast_rcnn_get_minibatch(conf, image_roidb(batch_indices_full));
-            im_blob_batch = squeeze(mat2cell(im_blob_batch, ...
-                size(im_blob_batch, 1), size(im_blob_batch, 2), ...
-                size(im_blob_batch, 3), ones(1, conf.batch_size)));
-
-            im_blob{i_batch} = im_blob_batch(1:batch_size_actual);
-            im_scales{i_batch} = im_scales_batch(1:batch_size_actual);
-        end
-        im_blob = cat(1, im_blob{:});
-        im_scales = cat(1, im_scales{:});
-        image_mean = conf.image_means(1);
-        save(cache_path, 'im_blob', 'im_scales', 'image_mean', '-v7.3');
-        
-        % trasnforming into struct
-        image_roidb_loaded = struct;
-        image_roidb_loaded.im_blob = im_blob;
-        image_roidb_loaded.im_scales = im_scales;
-        
-        clear im_blob im_scales
-    end
-end
-
-function net_inputs = get_nn_inputs(conf, image_roidb, image_roidb_loaded, sub_db_inds, opts)
-    if opts.datatset_in_memory
-        im_blob = image_roidb_loaded.im_blob(sub_db_inds);
-        % reshape to W x H x D x batch_size
-        im_blob = cell2mat(reshape(im_blob, [1 1 1 length(im_blob)]));
-
-        im_scales = image_roidb_loaded.im_scales(sub_db_inds);
-        [im_blob, ~, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
-            fast_rcnn_get_minibatch(conf, image_roidb(sub_db_inds), opts.prefetch, ...
-            im_blob, im_scales);
-    else
-        [im_blob, ~, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob] = ...
-            fast_rcnn_get_minibatch(conf, image_roidb(sub_db_inds), opts.prefetch);
-    end
-    net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, ...
-        bbox_loss_weights_blob, ones(size(bbox_loss_weights_blob))};
 end

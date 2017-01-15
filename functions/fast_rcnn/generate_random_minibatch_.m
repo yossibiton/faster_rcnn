@@ -1,4 +1,4 @@
-function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, image_roidb, ims_per_batch, batch_size, opts)
+function [shuffled_inds, sub_inds] = generate_random_minibatch_(shuffled_inds, image_roidb, ims_per_batch, batch_size, opts)
     
     if ~exist('batch_size', 'var')
         batch_size = ims_per_batch;
@@ -92,14 +92,12 @@ function image_indices = balance_classes(image_indices, pos_image_indices, pos_p
     end
     
     image_indices_pos = find(pos_image_indices(image_indices));
-    pos_num = length(image_indices_pos);
-    pos_part_curr = pos_num / length(image_indices);
-    if (pos_part_curr < pos_part)
+    pos_frac = length(image_indices_pos) / length(image_indices);
+    if (pos_frac < pos_part)
         % replicate "positive" images in order to have balanced sampling
-        neg_num = length(image_indices) - pos_num;
-        pos_num_new = (1 / (1 - pos_part)) * pos_part * neg_num;
-        rep_factor = pos_num_new / pos_num;
-        add_pos = round(pos_num_new) - pos_num; %round(rep_factor * sum(pos_image_indices(image_indices)));
+        rep_factor = 1 / pos_frac - 1/pos_part;
+        add_pos = round(rep_factor * sum(pos_image_indices(image_indices)));
+
         image_indices_pos_rep = repmat(image_indices_pos, ceil(rep_factor), 1);
         image_indices = [image_indices; ...
             image_indices_pos_rep(randperm(length(image_indices_pos_rep), add_pos))];

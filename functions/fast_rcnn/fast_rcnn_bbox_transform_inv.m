@@ -7,6 +7,8 @@ function [pred_boxes] = fast_rcnn_bbox_transform_inv(boxes, box_deltas)
 % Licensed under The MIT License [see LICENSE for details]
 % --------------------------------------------------------
     
+    % here width is measured as number of pixels inside bbox
+    % (and not distance between centers of first & last pixels)
     src_w = double(boxes(:, 3) - boxes(:, 1) + 1);
     src_h = double(boxes(:, 4) - boxes(:, 2) + 1);
     src_ctr_x = double(boxes(:, 1) + 0.5*(src_w-1));
