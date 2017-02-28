@@ -68,7 +68,12 @@ function [shuffled_inds, sub_inds] = generate_random_minibatch(shuffled_inds, im
             end
             
             % Final - shiffle examples & pack into batches
-            image_indices_final = image_indices4(randperm(length(image_indices4), epoch_size));
+            % 01 - older (successfull implementation)
+            lim = floor(length(image_indices4) / ims_per_batch) * ims_per_batch;
+            image_indices_final = image_indices4(randperm(length(image_indices4), lim));            
+            % 02 - restricting size to epoch_size
+            % image_indices_final = image_indices4(randperm(length(image_indices4), epoch_size));
+            
             image_indices_final = reshape(image_indices_final, ims_per_batch, []);
             shuffled_inds = num2cell(image_indices_final, 1);
         end

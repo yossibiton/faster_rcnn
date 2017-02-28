@@ -104,7 +104,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         caffe_solver.net.copy_from(opts.net_file);
     end
 
-    % first copy solver & network file to output dir
+    % first copy solver & network & conf file to output dir
     copyfile(opts.net_def_file, fullfile(cache_dir, 'train_val.prototxt'));
     copyfile(opts.solver_def_file, fullfile(cache_dir, 'solver.prototxt'));
     if exist(opts.test_net_def_file, 'file')
@@ -116,6 +116,7 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
         adaptive_opts = opts.adaptive_opts;
         save(fullfile(cache_dir, 'adaptive_opts.mat'), 'adaptive_opts');
     end
+    save(fullfile(cache_dir, 'conf.mat'), 'conf');
     
     % init log
     timestamp = datestr(datevec(now()), 'yyyymmdd_HHMMSS');
@@ -159,21 +160,8 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
     end
     
     if opts.do_val
-        if false
-            if exist(opts.test_net_def_file, 'file')
-                %caffe_net_test = caffe.Net(opts.test_net_def_file, 'test');
-                % we prefer to use the trainval file as it contains
-                % loss & accuracy layers
-                caffe_net_test = caffe.Net(opts.net_def_file, 'test');
-                one_train_test_net = false;
-            else
-                one_train_test_net = true;
-                caffe_net_test = caffe_solver.net;
-            end
-        else
-            caffe_net_test = caffe.Net(opts.net_def_file, 'test');
-            caffe_net_test.share_weights_with(caffe_solver.net);
-        end
+        caffe_net_test = caffe.Net(opts.net_def_file, 'test');
+        caffe_net_test.share_weights_with(caffe_solver.net);
         
         fprintf('Preparing validation data...');
         if exist(db_val_path, 'file')
@@ -352,10 +340,10 @@ function check_gpu_memory(conf, caffe_solver, num_classes, do_val)
     bbox_loss_weights_blob = bbox_targets_blob;
     
     net_inputs = {im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_weights_blob};
-    if (length(caffe_solver.net.inputs) == 6)
-        % should supply bbox_loss_weights_outside
-        net_inputs{end+1} = bbox_loss_weights_blob;
-    end
+    net_inputs{end+1} = bbox_loss_weights_blob;
+    net_inputs{end+1} = labels_blob; % additional features;
+    net_inputs = net_inputs(1:length(caffe_solver.net.inputs));
+    
     % Reshape net's input blobs
     caffe_solver.net.reshape_as_input(net_inputs);
 
@@ -420,12 +408,18 @@ function perf = show_state(iter, train_results, val_results)
     perf.train = struct;
     perf.train.error_cls = 1 - mean(train_results.accuracy.data);
     perf.train.loss_cls = mean(train_results.loss_cls.data);
-    perf.train.loss_reg = mean(train_results.loss_bbox.data);
     
     perf.test = struct;
     perf.test.error_cls = 1 - mean(val_results.accuracy.data);
     perf.test.loss_cls = mean(val_results.loss_cls.data);
-    perf.test.loss_reg = mean(val_results.loss_bbox.data);
+    
+    if isfield(train_results, 'loss_bbox')
+        perf.train.loss_reg = mean(train_results.loss_bbox.data);
+        perf.test.loss_reg = mean(val_results.loss_bbox.data);
+    else
+        perf.train.loss_reg = 0;
+        perf.test.loss_reg = 0;
+    end
     
     fprintf('\n------------------------- Iteration %d -------------------------\n', iter);
     fprintf('Training : error %.3g, loss (cls %.3g, reg %.3g)\n', ...

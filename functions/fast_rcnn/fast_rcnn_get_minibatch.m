@@ -1,5 +1,5 @@
-function [im_blob, im_scales, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] = fast_rcnn_get_minibatch(conf, image_roidb, prefetch, ...
-    im_blob, im_scales)
+function [im_blob, im_scales, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob, im_features] = ...
+    fast_rcnn_get_minibatch(conf, image_roidb, prefetch, im_blob, im_scales)
 % [im_blob, rois_blob, labels_blob, bbox_targets_blob, bbox_loss_blob] ...
 %    = fast_rcnn_get_minibatch(conf, image_roidb)
 % --------------------------------------------------------
@@ -13,7 +13,7 @@ function [im_blob, im_scales, rois_blob, labels_blob, bbox_targets_blob, bbox_lo
     
     num_images = length(image_roidb);
     
-    if ~exist('im_blob', 'var')
+    if ~exist('im_blob', 'var') || isempty(im_blob)
         % otherwise, im_blob & im_scales are supplied as inputs
         
         % Sample random scales to use for each image in this batch
@@ -55,9 +55,10 @@ function [im_blob, im_scales, rois_blob, labels_blob, bbox_targets_blob, bbox_lo
         labels_blob = zeros(0, 1, 'single');
         bbox_targets_blob = zeros(0, 4 * (num_classes+1), 'single');
         bbox_loss_blob = zeros(size(bbox_targets_blob), 'single');
-
+        im_features = [];
+        
         for i = 1:num_images
-            [labels, ~, im_rois, bbox_targets, bbox_loss] = ...
+            [labels, ~, im_rois, bbox_targets, bbox_loss, keep_inds] = ...
                 sample_rois(conf, image_roidb(i), fg_rois_per_image, rois_per_image);
 
             % Add to ROIs blob
@@ -70,6 +71,21 @@ function [im_blob, im_scales, rois_blob, labels_blob, bbox_targets_blob, bbox_lo
             labels_blob = [labels_blob; labels];
             bbox_targets_blob = [bbox_targets_blob; bbox_targets];
             bbox_loss_blob = [bbox_loss_blob; bbox_loss];
+            if conf.use_features
+                % feat = row features for each proposal
+                keep_feats = image_roidb(i).feat(keep_inds, :); 
+                if isfield(conf, 'norm_features')
+                    keep_feats = keep_feats*conf.norm_features(1) + ...
+                        conf.norm_features(2);
+                    if false
+                        % DEBUG - decrease scores for positives examples,
+                        % because of overfitting
+                        is_pos = sum(image_roidb(i).overlap(keep_inds, :) > 0.5, 2) > 0;
+                        keep_feats(is_pos) = keep_feats(is_pos) * 0.9;
+                    end
+                end
+                im_features = [im_features; keep_feats];
+            end
         end
 
         % permute data into caffe c++ memory, thus [num, channels, height, width]
@@ -78,7 +94,10 @@ function [im_blob, im_scales, rois_blob, labels_blob, bbox_targets_blob, bbox_lo
         labels_blob = single(permute(labels_blob, [3, 4, 2, 1]));
         bbox_targets_blob = single(permute(bbox_targets_blob, [3, 4, 2, 1])); 
         bbox_loss_blob = single(permute(bbox_loss_blob, [3, 4, 2, 1]));
-
+        if ~isempty(im_features)
+            im_features = single(permute(im_features, [3, 4, 2, 1]));
+        end
+        
         assert(~isempty(rois_blob));
         assert(~isempty(labels_blob));
         assert(~isempty(bbox_targets_blob));
@@ -148,7 +167,7 @@ function [im_blob, im_scales] = get_image_blob_prefetch(conf, images, target_siz
     im_blob = im_list_to_blob(processed_ims);
 end
 %% Generate a random sample of ROIs comprising foreground and background examples.
-function [labels, overlaps, rois, bbox_targets, bbox_loss_weights] = ...
+function [labels, overlaps, rois, bbox_targets, bbox_loss_weights, keep_inds] = ...
     sample_rois(conf, image_roidb, fg_rois_per_image, rois_per_image)
 
     [overlaps, labels] = max(image_roidb.overlap, [], 2);
