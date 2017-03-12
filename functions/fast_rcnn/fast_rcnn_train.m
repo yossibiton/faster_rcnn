@@ -189,8 +189,8 @@ function [save_model_path, perf, cache_dir, db_train_path, db_val_path] = ...
             % fix validation data (use original images order instead of random)
             num_images_val = length(image_roidb_val);
             num_images_trunc = conf.ims_per_batch * floor((num_images_val / conf.ims_per_batch));
-            tmp = reshape((1:num_images_trunc)', 128, []);
-            shuffled_inds_val = mat2cell(tmp, 128, ones(1, size(tmp, 2)));
+            tmp = reshape((1:num_images_trunc)', conf.ims_per_batch, []);
+            shuffled_inds_val = mat2cell(tmp, conf.ims_per_batch, ones(1, size(tmp, 2)));
         else
             shuffled_inds_val = generate_random_minibatch([], image_roidb_val, conf.ims_per_batch, conf.batch_size);
             shuffled_inds_val = shuffled_inds_val(randperm(length(shuffled_inds_val), min(opts.val_iters, length(shuffled_inds_val))));
